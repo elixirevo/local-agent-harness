@@ -25,6 +25,11 @@ export interface HarnessConfig {
   /** Persist conversations to .harness/sessions/*.jsonl (resume with --resume). */
   saveSessions: boolean;
   compaction: CompactionSettings;
+  /** Subagent options: a smaller model for explore, and its step budget. */
+  agents?: {
+    exploreModel?: string;
+    maxSteps?: number;
+  };
   /** Profile overrides keyed by exact model id or family name. */
   models?: Record<string, Partial<ModelProfile>>;
 }

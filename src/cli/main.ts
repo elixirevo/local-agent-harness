@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { createAgentTool } from '../agents/agentTool.js';
 import { ReminderQueue } from '../context/reminders.js';
 import { startupContext } from '../context/startup.js';
 import { effectiveContextLength, loadConfig } from '../config/config.js';
@@ -169,6 +170,16 @@ async function main(): Promise<void> {
       });
     }
   }
+
+  // The subagent inherits the live session state so /model switches apply.
+  registry.register(
+    createAgentTool(() => ({
+      provider: session.provider,
+      config: session.config,
+      cwd,
+      parentModel: session.model,
+    })),
+  );
 
   const session: CliSession = {
     provider,
