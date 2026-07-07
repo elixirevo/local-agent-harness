@@ -18,11 +18,12 @@ export class LlamaCppProvider extends OpenAICompatProvider {
 
   protected override extendBody(
     body: Record<string, unknown>,
-    _req: ChatRequest,
+    req: ChatRequest,
   ): Record<string, unknown> {
     // Default in recent builds, but the whole harness depends on it — be explicit.
     body.cache_prompt = true;
     body.timings_per_token = false;
+    if (req.format) body.json_schema = req.format;
     return body;
   }
 

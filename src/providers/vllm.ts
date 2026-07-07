@@ -1,5 +1,5 @@
 import { OpenAICompatProvider, type OpenAICompatOptions } from './openaiCompat.js';
-import type { ProviderCaps } from './types.js';
+import type { ChatRequest, ProviderCaps } from './types.js';
 
 /**
  * vLLM adapter. Pure OpenAI-compatible wire for now; reports cache hits via
@@ -15,5 +15,13 @@ export class VllmProvider extends OpenAICompatProvider {
 
   override capabilities(): ProviderCaps {
     return { nativeToolCalls: true, grammar: true, tokenCount: false, reportsCacheHits: true };
+  }
+
+  protected override extendBody(
+    body: Record<string, unknown>,
+    req: ChatRequest,
+  ): Record<string, unknown> {
+    if (req.format) body.guided_json = req.format;
+    return body;
   }
 }

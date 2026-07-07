@@ -37,6 +37,12 @@ export interface ChatRequest {
   thinking?: ThinkingMode;
   /** Enable/disable reasoning where the provider supports toggling it. */
   think?: boolean;
+  /**
+   * JSON Schema to constrain the output (grammar enforcement). Honored by
+   * providers whose capabilities() report grammar: Ollama format, llama.cpp
+   * json_schema, vLLM guided_json. Others ignore it.
+   */
+  format?: Record<string, unknown>;
   signal?: AbortSignal;
 }
 

@@ -142,6 +142,7 @@ export class OllamaProvider implements ProviderAdapter {
     if (withThink && req.thinking && req.thinking !== 'none' && req.think !== undefined) {
       body.think = req.think;
     }
+    if (req.format) body.format = req.format;
     if (req.tools?.length) {
       body.tools = req.tools.map((t) => ({
         type: 'function',

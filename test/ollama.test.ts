@@ -37,6 +37,16 @@ describe('OllamaProvider', () => {
     expect(body.stream).toBe(true);
   });
 
+  it('passes a format schema through for grammar enforcement', async () => {
+    const { fn, calls } = fetchMock(() =>
+      ndjsonResponse([{ message: { role: 'assistant', content: '{}' }, done: true, done_reason: 'stop' }]),
+    );
+    const p = new OllamaProvider({ baseUrl: 'http://x', fetchFn: fn });
+    const schema = { type: 'object', properties: { a: { type: 'string' } } };
+    await collect(p.chat({ ...baseReq, format: schema }));
+    expect(calls[0].body.format).toEqual(schema);
+  });
+
   it('maps thinking/content fields and final counters to chunks', async () => {
     const lines = [
       { message: { role: 'assistant', thinking: 'Let me ' }, done: false },

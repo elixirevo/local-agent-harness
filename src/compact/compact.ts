@@ -1,7 +1,15 @@
 import { systemReminder } from '../context/reminders.js';
 import { estimateContextTokens, estimateMessageTokens } from '../context/budget.js';
 import type { ChatMessage, ProviderAdapter, ThinkingMode } from '../providers/types.js';
-import { COMPACT_PROMPT, COMPACT_RETRY_SUFFIX, continuationBlock, countSections } from './prompt.js';
+import {
+  COMPACT_PROMPT,
+  COMPACT_RETRY_SUFFIX,
+  continuationBlock,
+  countSections,
+  renderJsonSummary,
+  SUMMARY_JSON_SUFFIX,
+  SUMMARY_SCHEMA,
+} from './prompt.js';
 
 export interface CompactOptions {
   provider: ProviderAdapter;
@@ -135,7 +143,7 @@ async function summarize(
     trimmed = trimmed.slice(1);
   }
 
-  const attempt = async (promptSuffix: string): Promise<string> => {
+  const attempt = async (promptSuffix: string, format?: Record<string, unknown>): Promise<string> => {
     const request: ChatMessage[] = [
       ...(system ? [system] : []),
       ...trimmed,
@@ -150,6 +158,7 @@ async function summarize(
       contextLength: opts.contextLength,
       thinking: opts.thinking,
       think: opts.think,
+      format,
       signal: opts.signal,
     })) {
       if (chunk.type === 'text') text += chunk.text;
@@ -159,7 +168,19 @@ async function summarize(
 
   let summary = await attempt('');
   if (countSections(summary) >= MIN_ACCEPT_SECTIONS) return { summary, degraded: false };
-  const retry = await attempt(COMPACT_RETRY_SUFFIX);
+
+  // Retry. Where the server supports grammar enforcement, constrain the retry
+  // to the six-section JSON schema instead of asking nicely again.
+  let retry = '';
+  if (opts.provider.capabilities().grammar) {
+    try {
+      const rendered = renderJsonSummary(await attempt(SUMMARY_JSON_SUFFIX, SUMMARY_SCHEMA));
+      if (rendered) retry = rendered;
+    } catch {
+      // e.g. the server rejects format together with thinking — fall through
+    }
+  }
+  if (!retry) retry = await attempt(COMPACT_RETRY_SUFFIX);
   if (countSections(retry) >= MIN_ACCEPT_SECTIONS) return { summary: retry, degraded: false };
   // Keep the better of the two rather than losing the session.
   summary = countSections(retry) >= countSections(summary) ? retry : summary;

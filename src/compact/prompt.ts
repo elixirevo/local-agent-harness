@@ -42,6 +42,50 @@ export const COMPACT_PROMPT = [
 export const COMPACT_RETRY_SUFFIX =
   '\n\nYour previous response did not contain the six required "## N." sections. Produce ALL six numbered sections this time, starting with "## 1.".';
 
+/** Retry-with-grammar: the same six sections as a constrained JSON object. */
+export const SUMMARY_JSON_SUFFIX =
+  '\n\nThis time respond as a single JSON object with exactly these string fields: task_and_intent, files_and_code, what_was_tried, user_feedback, current_state, next_step.';
+
+export const SUMMARY_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    task_and_intent: { type: 'string' },
+    files_and_code: { type: 'string' },
+    what_was_tried: { type: 'string' },
+    user_feedback: { type: 'string' },
+    current_state: { type: 'string' },
+    next_step: { type: 'string' },
+  },
+  required: ['task_and_intent', 'files_and_code', 'what_was_tried', 'user_feedback', 'current_state', 'next_step'],
+};
+
+const JSON_SECTION_TITLES: Array<[string, string]> = [
+  ['task_and_intent', 'Task and intent'],
+  ['files_and_code', 'Files and code'],
+  ['what_was_tried', 'What was tried'],
+  ['user_feedback', 'User feedback'],
+  ['current_state', 'Current state'],
+  ['next_step', 'Next step'],
+];
+
+/** Render a schema-constrained summary back into the "## N." text contract. */
+export function renderJsonSummary(raw: string): string | undefined {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  const rec = obj as Record<string, unknown>;
+  const parts: string[] = [];
+  JSON_SECTION_TITLES.forEach(([key, title], i) => {
+    const value = typeof rec[key] === 'string' && (rec[key] as string).trim() ? (rec[key] as string).trim() : '(none)';
+    parts.push(`## ${i + 1}. ${title}\n${value}`);
+  });
+  return parts.join('\n\n');
+}
+
 /** How many of the six section headings appear in a candidate summary. */
 export function countSections(summary: string): number {
   let n = 0;
