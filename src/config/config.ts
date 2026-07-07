@@ -30,6 +30,8 @@ export interface HarnessConfig {
     exploreModel?: string;
     maxSteps?: number;
   };
+  /** MCP servers to connect over stdio; their tools register as mcp__name__tool. */
+  mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   /** Profile overrides keyed by exact model id or family name. */
   models?: Record<string, Partial<ModelProfile>>;
 }

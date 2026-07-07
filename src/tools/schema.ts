@@ -36,6 +36,10 @@ export function validateInput(schema: InputSchema, input: unknown): string[] {
       case 'boolean':
         if (typeof value !== 'boolean') errors.push(`"${key}" must be a boolean`);
         break;
+      default:
+        // Types beyond our subset (object/array — e.g. from MCP server
+        // schemas) are not validated locally; the executing side owns them.
+        break;
     }
   }
   return errors;
