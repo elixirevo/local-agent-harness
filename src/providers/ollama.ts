@@ -25,11 +25,12 @@ export interface OllamaOptions {
  * truncates — fatal for an agent), keep_alive, the thinking field, and
  * prefill timing.
  *
- * Cache measurement: as of Ollama 0.30, prompt_eval_count reports the FULL
- * prompt token count even when the KV cache was reused (verified empirically:
- * identical repeated request → same count, ~4x lower prompt_eval_duration).
- * So promptTokens gets the count and prompt_eval_duration is the cache-hit
- * signal — a warm prefix collapses prefill time.
+ * Cache measurement: prompt_eval_count semantics VARY by model/engine in
+ * Ollama 0.30 (verified empirically): an identical repeated request reported
+ * the full count (52/52), while a growing agent conversation on llama3.2
+ * reported deltas (1336→401→531). So the count is surfaced as promptTokens
+ * on a best-effort basis, and prompt_eval_duration is the reliable cache-hit
+ * signal — a warm prefix collapses prefill time in every observed case.
  */
 export class OllamaProvider implements ProviderAdapter {
   readonly name = 'ollama';
