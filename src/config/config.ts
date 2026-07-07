@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ModelProfile, ResolvedProfile } from '../models/profile.js';
+import type { PermissionMode } from '../permissions/gate.js';
 
 export interface ProviderConfig {
   type: 'ollama' | 'llamacpp' | 'vllm' | 'openai-compat';
@@ -15,15 +16,19 @@ export interface HarnessConfig {
   providers: Record<string, ProviderConfig>;
   /** VRAM guard: effective num_ctx = min(profile.contextLength, this). */
   contextLength: number;
-  systemPrompt: string;
+  /** Set only by the user (file or --system); when absent the CLI picks an agent/chat default. */
+  systemPrompt?: string;
+  permissionMode: PermissionMode;
+  /** Model steps allowed per user turn before the loop guard stops. */
+  maxSteps: number;
   /** Profile overrides keyed by exact model id or family name. */
   models?: Record<string, Partial<ModelProfile>>;
 }
 
 /**
- * Phase 0 placeholder. Deliberately static — no date, no cwd — so the prompt
- * prefix is byte-identical across turns and sessions (prefix-cache friendly).
- * Phase 2 replaces this with tiered section assembly behind a dynamic boundary.
+ * Chat-only fallback (models without native tool calls). Deliberately static —
+ * no date, no cwd — so the prompt prefix is byte-identical across sessions
+ * (prefix-cache friendly).
  */
 export const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful assistant running on a locally hosted model. Be direct and concise.';
@@ -36,7 +41,8 @@ const DEFAULTS: HarnessConfig = {
     vllm: { type: 'vllm', baseUrl: 'http://localhost:8000' },
   },
   contextLength: 32768,
-  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  permissionMode: 'ask',
+  maxSteps: 20,
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';

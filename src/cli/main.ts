@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { effectiveContextLength, loadConfig } from '../config/config.js';
+import { DEFAULT_SYSTEM_PROMPT, effectiveContextLength, loadConfig } from '../config/config.js';
 import { resolveProfile } from '../models/profile.js';
+import { PermissionGate, PERMISSION_MODES, type PermissionMode } from '../permissions/gate.js';
+import { agentSystemPrompt } from '../prompts/agent.js';
 import { createProvider } from '../providers/index.js';
-import { friendlyFetchError, oneShot, runRepl, type Session } from './repl.js';
+import { defaultRegistry } from '../tools/registry.js';
+import { friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
 
 const VERSION = '0.1.0';
 
@@ -11,18 +14,22 @@ const USAGE = `agent-harness ${VERSION} — local LLM agent harness (Ollama / ll
 
 Usage:
   harness [options]              start interactive REPL
-  harness -p "question"          one-shot mode (prints answer and exits)
+  harness -p "task"              one-shot mode (prints the run and exits)
 
 Options:
-  -P, --provider <name>   provider name from config (default: ollama)
-  -m, --model <id>        model id (default: config.defaultModel, else first available)
-  -p, --prompt <text>     one-shot prompt
-      --base-url <url>    override the provider's base URL
-      --ctx <n>           context length (overrides the profile/config cap)
-      --system <text>     override the system prompt
-      --no-think          disable thinking on models that support toggling it
-  -h, --help              show help
-  -v, --version           show version
+  -P, --provider <name>        provider name from config (default: ollama)
+  -m, --model <id>             model id (default: config.defaultModel, else first available)
+  -p, --prompt <text>          one-shot prompt
+  -M, --permission-mode <m>    readonly | ask | auto (default: ask)
+                               readonly: mutating tools are not offered to the model
+                               ask: each file mutation asks y/N (interactive only)
+                               auto: mutations inside the working directory run without asking
+      --base-url <url>         override the provider's base URL
+      --ctx <n>                context length (overrides the profile/config cap)
+      --system <text>          override the system prompt
+      --no-think               disable thinking on models that support toggling it
+  -h, --help                   show help
+  -v, --version                show version
 
 Config: ./harness.config.json (optional; defaults target localhost servers)`;
 
@@ -32,6 +39,7 @@ async function main(): Promise<void> {
       provider: { type: 'string', short: 'P' },
       model: { type: 'string', short: 'm' },
       prompt: { type: 'string', short: 'p' },
+      'permission-mode': { type: 'string', short: 'M' },
       'base-url': { type: 'string' },
       ctx: { type: 'string' },
       system: { type: 'string' },
@@ -59,6 +67,11 @@ async function main(): Promise<void> {
   if (values['base-url']) providerCfg.baseUrl = values['base-url'];
   const provider = createProvider(providerName, providerCfg);
 
+  const mode = (values['permission-mode'] ?? config.permissionMode) as PermissionMode;
+  if (!PERMISSION_MODES.includes(mode)) {
+    die(`invalid --permission-mode "${mode}" — use one of: ${PERMISSION_MODES.join(', ')}`);
+  }
+
   let model = values.model ?? config.defaultModel;
   if (!model) {
     let models: string[];
@@ -68,7 +81,9 @@ async function main(): Promise<void> {
       die(friendlyFetchError(providerName, providerCfg.baseUrl, err));
     }
     if (models.length === 0) {
-      die(`no models available on ${providerName}${providerName === 'ollama' ? ' — pull one with: ollama pull <model>' : ''}`);
+      die(
+        `no models available on ${providerName}${providerName === 'ollama' ? ' — pull one with: ollama pull <model>' : ''}`,
+      );
     }
     model = models[0];
   }
@@ -80,9 +95,14 @@ async function main(): Promise<void> {
     if (!Number.isFinite(n) || n <= 0) die(`invalid --ctx value: ${values.ctx}`);
     contextLength = n;
   }
-  if (values.system) config.systemPrompt = values.system;
 
-  const session: Session = {
+  const cwd = process.cwd();
+  const systemPrompt =
+    values.system ??
+    config.systemPrompt ??
+    (profile.nativeToolCalls ? agentSystemPrompt(cwd) : DEFAULT_SYSTEM_PROMPT);
+
+  const session: CliSession = {
     provider,
     providerName,
     model,
@@ -90,7 +110,12 @@ async function main(): Promise<void> {
     config,
     contextLength,
     think: profile.thinking === 'none' ? undefined : !values['no-think'],
-    messages: [{ role: 'system', content: config.systemPrompt }],
+    messages: [{ role: 'system', content: systemPrompt }],
+    registry: defaultRegistry(),
+    // The REPL swaps in a gate wired to its readline for interactive approval.
+    gate: new PermissionGate(mode, cwd, undefined),
+    toolCtx: { cwd, readFiles: new Map() },
+    maxSteps: config.maxSteps,
   };
 
   if (values.prompt !== undefined) {

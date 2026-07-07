@@ -1,104 +1,20 @@
-import * as readline from 'node:readline';
+import * as readline from 'node:readline/promises';
+import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import { effectiveContextLength, type HarnessConfig } from '../config/config.js';
-import { resolveProfile, type ResolvedProfile } from '../models/profile.js';
+import { resolveProfile } from '../models/profile.js';
+import { PermissionGate, type AskFn } from '../permissions/gate.js';
 import { createProvider } from '../providers/index.js';
-import type {
-  ChatMessage,
-  ProviderAdapter,
-  StopReason,
-  ToolCall,
-  Usage,
-} from '../providers/types.js';
+import type { Usage } from '../providers/types.js';
 
-export interface Session {
-  provider: ProviderAdapter;
+export interface CliSession extends AgentSession {
   providerName: string;
-  model: string;
-  profile: ResolvedProfile;
   config: HarnessConfig;
-  /** Effective context window sent to the provider. */
-  contextLength: number;
-  /** undefined = model has no toggleable thinking. */
-  think: boolean | undefined;
-  /** Append-only conversation history; [0] is the system prompt. */
-  messages: ChatMessage[];
-}
-
-export interface GenResult {
-  content: string;
-  thinking: string;
-  toolCalls: ToolCall[];
-  usage?: Usage;
-  stopReason: StopReason;
-  wallMs: number;
-}
-
-interface GenOutput {
-  onText?: (t: string) => void;
-  onThinking?: (t: string) => void;
 }
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const dim = (s: string) => (useColor ? `\x1b[2m${s}\x1b[0m` : s);
 const bold = (s: string) => (useColor ? `\x1b[1m${s}\x1b[0m` : s);
-
-/** Run one model call over the session history, streaming through `out`. */
-export async function generate(
-  session: Session,
-  out: GenOutput = {},
-  signal?: AbortSignal,
-): Promise<GenResult> {
-  const started = Date.now();
-  let content = '';
-  let thinking = '';
-  const toolCalls: ToolCall[] = [];
-  let usage: Usage | undefined;
-  let stopReason: StopReason = 'unknown';
-
-  try {
-    for await (const chunk of session.provider.chat({
-      model: session.model,
-      messages: session.messages,
-      temperature: session.profile.temperature,
-      contextLength: session.contextLength,
-      thinking: session.profile.thinking,
-      think: session.think,
-      signal,
-    })) {
-      switch (chunk.type) {
-        case 'text':
-          content += chunk.text;
-          out.onText?.(chunk.text);
-          break;
-        case 'thinking':
-          thinking += chunk.text;
-          out.onThinking?.(chunk.text);
-          break;
-        case 'tool_call':
-          toolCalls.push(chunk.call);
-          break;
-        case 'usage':
-          usage = chunk.usage;
-          break;
-        case 'done':
-          stopReason = chunk.stopReason;
-          break;
-      }
-    }
-  } catch (err) {
-    if (isAbortError(err)) {
-      stopReason = 'aborted';
-    } else {
-      throw err;
-    }
-  }
-  return { content, thinking, toolCalls, usage, stopReason, wallMs: Date.now() - started };
-}
-
-function isAbortError(err: unknown): boolean {
-  const e = err as { name?: string; code?: string };
-  return e?.name === 'AbortError' || e?.code === 'ABORT_ERR';
-}
+const PROMPT = useColor ? '\x1b[36m❯\x1b[0m ' : '> ';
 
 export function friendlyFetchError(providerName: string, baseUrl: string, err: unknown): string {
   const cause = (err as { cause?: { code?: string } })?.cause;
@@ -114,7 +30,8 @@ export function friendlyFetchError(providerName: string, baseUrl: string, err: u
 export function formatUsage(u: Usage, wallMs: number): string {
   const parts: string[] = [`${(wallMs / 1000).toFixed(1)}s`];
   const cached = u.cachedTokens !== undefined ? ` (cached ${u.cachedTokens})` : '';
-  const prefill = u.promptMs !== undefined ? ` in ${u.promptMs < 100 ? u.promptMs.toFixed(0) : Math.round(u.promptMs)}ms` : '';
+  const prefill =
+    u.promptMs !== undefined ? ` in ${u.promptMs < 100 ? u.promptMs.toFixed(0) : Math.round(u.promptMs)}ms` : '';
   if (u.promptEvalTokens !== undefined) {
     parts.push(`prompt eval ${u.promptEvalTokens} tok${cached}${prefill}`);
   } else if (u.promptTokens !== undefined) {
@@ -130,122 +47,94 @@ export function formatUsage(u: Usage, wallMs: number): string {
   return `[${parts.join(' · ')}]`;
 }
 
-/** One user turn: stream the answer to stdout and record it in history. */
-async function chatTurn(session: Session, input: string, signal?: AbortSignal): Promise<void> {
-  session.messages.push({ role: 'user', content: input });
-  let sawThinking = false;
-  let startedText = false;
-  try {
-    const res = await generate(
-      session,
-      {
-        onThinking: (t) => {
-          if (!sawThinking) {
-            process.stdout.write(dim('[thinking] '));
-            sawThinking = true;
-          }
-          process.stdout.write(dim(t));
-        },
-        onText: (t) => {
-          if (sawThinking && !startedText) process.stdout.write('\n\n');
-          startedText = true;
-          process.stdout.write(t);
-        },
-      },
-      signal,
-    );
-    process.stdout.write('\n');
-    if (res.stopReason === 'aborted') {
-      console.log(dim('[interrupted]'));
-      if (!res.content) {
-        session.messages.pop(); // turn never produced anything — drop it
-        return;
+interface RenderState {
+  sawThinking: boolean;
+  startedText: boolean;
+  atLineStart: boolean;
+}
+
+function newRenderState(): RenderState {
+  return { sawThinking: false, startedText: false, atLineStart: true };
+}
+
+const write = (s: string) => process.stdout.write(s);
+
+function ensureNewline(st: RenderState): void {
+  if (!st.atLineStart) {
+    write('\n');
+    st.atLineStart = true;
+  }
+}
+
+function renderEvent(ev: AgentEvent, st: RenderState): void {
+  switch (ev.type) {
+    case 'thinking':
+      if (!st.sawThinking) {
+        ensureNewline(st);
+        write(dim('[thinking] '));
+        st.sawThinking = true;
       }
-    }
-    if (res.stopReason === 'length') console.log(dim('[hit max output length]'));
-    // History stores only the answer, never the reasoning: thinking must not
-    // be replayed into the next prompt (context cost, and models don't expect it).
-    session.messages.push({ role: 'assistant', content: res.content });
-    if (res.usage) console.log(dim(formatUsage(res.usage, res.wallMs)));
+      write(dim(ev.text));
+      st.atLineStart = ev.text.endsWith('\n');
+      break;
+    case 'text':
+      if (st.sawThinking && !st.startedText) {
+        write('\n\n');
+        st.atLineStart = true;
+      }
+      st.startedText = true;
+      write(ev.text);
+      st.atLineStart = ev.text.endsWith('\n');
+      break;
+    case 'tool_start':
+      ensureNewline(st);
+      write(dim(`→ ${ev.name} ${ev.summary}`) + '\n');
+      break;
+    case 'tool_end':
+      write(dim(`  ${ev.ok ? '✓' : '✗'} ${ev.summary}`) + '\n');
+      break;
+    case 'step':
+      ensureNewline(st);
+      if (ev.usage) write(dim(formatUsage(ev.usage, ev.wallMs)) + '\n');
+      // a new model step starts fresh for thinking/text separation
+      st.sawThinking = false;
+      st.startedText = false;
+      break;
+    case 'guard':
+      ensureNewline(st);
+      write(dim(`[guard] ${ev.message}`) + '\n');
+      break;
+  }
+}
+
+/**
+ * One user turn through the agent loop. On any failure the whole turn is
+ * rolled back (messages truncated to the pre-turn snapshot) so the history
+ * never contains an assistant message with dangling tool calls.
+ */
+async function chatTurn(session: CliSession, input: string, signal?: AbortSignal): Promise<void> {
+  const snapshot = session.messages.length;
+  const st = newRenderState();
+  try {
+    for await (const ev of runTurn(session, input, signal)) renderEvent(ev, st);
+    ensureNewline(st);
   } catch (err) {
-    session.messages.pop(); // keep history consistent on failure
+    session.messages.length = snapshot;
+    ensureNewline(st);
+    if (isAbortError(err)) {
+      console.log(dim('[interrupted — turn discarded]'));
+      return;
+    }
     throw err;
   }
 }
 
-export async function oneShot(session: Session, prompt: string): Promise<void> {
-  await chatTurn(session, prompt);
+function isAbortError(err: unknown): boolean {
+  const e = err as { name?: string; code?: string };
+  return e?.name === 'AbortError' || e?.code === 'ABORT_ERR';
 }
 
-const HELP = `commands:
-  /help               show this help
-  /models             list models on the current provider
-  /model <id>         switch model (re-resolves its profile)
-  /provider <name>    switch provider (${'{'}configured in harness.config.json${'}'})
-  /clear              reset conversation (keeps system prompt)
-  /exit               quit`;
-
-export async function runRepl(session: Session): Promise<void> {
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (interactive) printBanner(session);
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: interactive ? process.stdout : undefined,
-    terminal: interactive,
-    prompt: useColor ? '\x1b[36m❯\x1b[0m ' : '> ',
-  });
-
-  let currentAbort: AbortController | null = null;
-  rl.on('SIGINT', () => {
-    if (currentAbort) {
-      currentAbort.abort();
-    } else {
-      process.stdout.write('\n');
-      rl.close();
-    }
-  });
-
-  if (interactive) rl.prompt();
-  for await (const raw of rl) {
-    const input = raw.trim();
-    if (input) {
-      if (input.startsWith('/')) {
-        const quit = await handleCommand(session, input);
-        if (quit) break;
-      } else {
-        currentAbort = new AbortController();
-        try {
-          await chatTurn(session, input, currentAbort.signal);
-        } catch (err) {
-          printError(session, err);
-        } finally {
-          currentAbort = null;
-        }
-      }
-    }
-    if (interactive) rl.prompt();
-  }
-  rl.close();
-}
-
-function printBanner(session: Session): void {
-  const p = session.profile;
-  console.log(bold(`agent-harness v0.1.0`));
-  console.log(
-    `provider: ${session.providerName} · model: ${session.model} ` +
-      dim(`(family ${p.family} · ctx ${session.contextLength} · thinking ${p.thinking})`),
-  );
-  console.log(dim('/help for commands'));
-  console.log(
-    dim(
-      'tip: watch the prompt prefill time in the stats line — a warm prefix cache makes it collapse on follow-up turns (llama.cpp/vLLM additionally report evaluated vs cached token counts).',
-    ),
-  );
-  console.log();
-}
-
-function printError(session: Session, err: unknown): void {
+function printError(session: CliSession, err: unknown): void {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes('fetch failed')) {
     const cfg = session.config.providers[session.providerName];
@@ -255,8 +144,94 @@ function printError(session: Session, err: unknown): void {
   }
 }
 
+export async function oneShot(session: CliSession, prompt: string): Promise<void> {
+  // Non-interactive: "ask" cannot prompt, so mutations are denied with a hint.
+  session.gate = new PermissionGate(session.gate.mode, session.toolCtx.cwd, undefined);
+  await chatTurn(session, prompt);
+}
+
+export async function runRepl(session: CliSession): Promise<void> {
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (interactive) printBanner(session);
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: interactive ? process.stdout : undefined,
+    terminal: interactive,
+  });
+  const ask: AskFn | undefined = interactive
+    ? async (summary) => {
+        const answer = await rl.question(`${bold('allow')} ${summary}? [y/N] `);
+        return ['y', 'yes'].includes(answer.trim().toLowerCase());
+      }
+    : undefined;
+  session.gate = new PermissionGate(session.gate.mode, session.toolCtx.cwd, ask);
+
+  let currentAbort: AbortController | null = null;
+  rl.on('SIGINT', () => {
+    if (currentAbort) {
+      currentAbort.abort();
+    } else {
+      write('\n');
+      rl.close();
+    }
+  });
+
+  while (true) {
+    let line: string;
+    try {
+      line = await rl.question(interactive ? PROMPT : '');
+    } catch {
+      break; // interface closed (Ctrl+C at prompt, Ctrl+D, or stdin EOF)
+    }
+    const input = line.trim();
+    if (!input) continue;
+    if (input.startsWith('/')) {
+      if (await handleCommand(session, input)) break;
+      continue;
+    }
+    currentAbort = new AbortController();
+    try {
+      await chatTurn(session, input, currentAbort.signal);
+    } catch (err) {
+      printError(session, err);
+    } finally {
+      currentAbort = null;
+    }
+  }
+  rl.close();
+}
+
+function toolsLine(session: CliSession): string {
+  if (!session.profile.nativeToolCalls) {
+    return 'tools: disabled — this model has no native tool-call support (text-protocol fallback lands in Phase 2)';
+  }
+  const names = session.registry.list(session.gate.mode).map((t) => t.name);
+  return `tools: ${names.join(', ')} · permission mode: ${session.gate.mode}`;
+}
+
+function printBanner(session: CliSession): void {
+  const p = session.profile;
+  console.log(bold('agent-harness v0.1.0'));
+  console.log(
+    `provider: ${session.providerName} · model: ${session.model} ` +
+      dim(`(family ${p.family} · ctx ${session.contextLength} · thinking ${p.thinking})`),
+  );
+  console.log(dim(toolsLine(session)));
+  console.log(dim('/help for commands'));
+  console.log();
+}
+
+const HELP = `commands:
+  /help               show this help
+  /models             list models on the current provider
+  /model <id>         switch model (re-resolves its profile)
+  /provider <name>    switch provider (configured in harness.config.json)
+  /clear              reset conversation (keeps system prompt)
+  /exit               quit`;
+
 /** Returns true when the REPL should exit. */
-async function handleCommand(session: Session, input: string): Promise<boolean> {
+async function handleCommand(session: CliSession, input: string): Promise<boolean> {
   const [cmd, ...rest] = input.split(/\s+/);
   const arg = rest.join(' ');
   switch (cmd) {
@@ -266,11 +241,11 @@ async function handleCommand(session: Session, input: string): Promise<boolean> 
     case '/help':
       console.log(HELP);
       return false;
-    case '/clear': {
+    case '/clear':
       session.messages = session.messages.slice(0, 1);
+      session.toolCtx.readFiles.clear();
       console.log(dim('conversation cleared'));
       return false;
-    }
     case '/models': {
       try {
         const models = await session.provider.listModels();
@@ -294,6 +269,9 @@ async function handleCommand(session: Session, input: string): Promise<boolean> 
           `model → ${arg} (family ${session.profile.family} · ctx ${session.contextLength} · thinking ${session.profile.thinking})`,
         ),
       );
+      if (!session.profile.nativeToolCalls) {
+        console.log(dim('note: this model has no native tool-call support — tools are disabled for it'));
+      }
       return false;
     }
     case '/provider': {
