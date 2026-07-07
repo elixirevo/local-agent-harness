@@ -1,27 +1,42 @@
 import type { ChatMessage, ToolDef } from '../providers/types.js';
 
 /**
- * Conservative token estimation. Tokenizers differ per model and Ollama's
- * usage reporting is unreliable as a "total context" signal (semantics vary
- * by engine — see providers/ollama.ts), so budgeting is self-computed from
- * characters with a safety margin: ~3.3 chars/token overestimates for
- * English/code (real ratio ≈ 4), i.e. errs toward compacting early. CJK text
- * runs closer to 1 token/char, which this underestimates — acceptable while
- * tool output (code, logs) dominates agent contexts.
+ * Token estimation by character class. Measured against real tokenizers
+ * (Ollama prompt_eval_count, slope method to cancel template overhead,
+ * 2026-07-07 — see the eval notes):
+ *
+ *   chars/token        gemma4:e2b   llama3.2
+ *   code                  3.25        4.19
+ *   English prose         6.53        6.32
+ *   Korean                1.59        1.52
+ *   tool output (cat -n)  2.45        3.38
+ *
+ * A single divisor cannot be safe for that spread — a uniform 3.3 was 2×
+ * UNDER for Korean (overflow risk, the dangerous direction) while 2× over
+ * for prose (needless early compaction). Splitting by character class gets
+ * both within tolerable bounds: ASCII at 3.0 (slightly conservative for
+ * code/tool output, generous for prose), non-ASCII at 1.6 (CJK-calibrated).
+ * The compaction threshold's 25% headroom absorbs the residual error.
  */
-const CHARS_PER_TOKEN = 3.3;
+const ASCII_CHARS_PER_TOKEN = 3.0;
+const NON_ASCII_CHARS_PER_TOKEN = 1.6;
 const PER_MESSAGE_OVERHEAD = 5;
 
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  let nonAscii = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 127) nonAscii++;
+  }
+  const ascii = text.length - nonAscii;
+  return Math.ceil(ascii / ASCII_CHARS_PER_TOKEN + nonAscii / NON_ASCII_CHARS_PER_TOKEN);
 }
 
 export function estimateMessageTokens(message: ChatMessage): number {
-  let chars = message.content.length;
+  let total = estimateTokens(message.content);
   if (message.toolCalls) {
-    for (const call of message.toolCalls) chars += call.name.length + call.arguments.length + 20;
+    for (const call of message.toolCalls) total += estimateTokens(call.name + call.arguments) + 6;
   }
-  return Math.ceil(chars / CHARS_PER_TOKEN) + PER_MESSAGE_OVERHEAD;
+  return total + PER_MESSAGE_OVERHEAD;
 }
 
 export function estimateContextTokens(messages: ChatMessage[], toolDefs?: ToolDef[]): number {

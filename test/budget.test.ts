@@ -9,10 +9,18 @@ import { clearOldToolResults, CLEARED_NOTE } from '../src/context/frc.js';
 import type { ChatMessage } from '../src/providers/types.js';
 
 describe('token estimation', () => {
-  it('overestimates typical English/code (safety direction)', () => {
+  it('stays at or above real tokenizer counts for code (safety direction)', () => {
     const text = 'function add(a, b) { return a + b; } // typical code density';
-    // real tokenizers land near chars/4; our chars/3.3 must be higher
-    expect(estimateTokens(text)).toBeGreaterThan(text.length / 4);
+    // measured: code ≈ chars/3.25 (gemma4) — our chars/3.0 must estimate higher
+    expect(estimateTokens(text)).toBeGreaterThan(text.length / 3.25);
+  });
+
+  it('estimates CJK text near 1.6 chars/token instead of drowning it in the ASCII ratio', () => {
+    const korean = '분기별 인프라 마이그레이션 계획은 롤아웃 일정과 예산 검토를 다룬다.'.repeat(10);
+    const est = estimateTokens(korean);
+    // measured: Korean ≈ chars/1.5-1.6; a uniform /3.3 would halve the count
+    expect(est).toBeGreaterThan(korean.length / 2.2);
+    expect(est).toBeLessThan(korean.length / 1.2);
   });
 
   it('counts tool calls and message overhead', () => {
