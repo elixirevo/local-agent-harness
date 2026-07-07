@@ -62,6 +62,11 @@ const textStep = (text: string): ChatChunk[] => [
   { type: 'done', stopReason: 'stop' },
 ];
 
+const twoToolStep = (...calls: ToolCall[]): ChatChunk[] => [
+  ...calls.map((c): ChatChunk => ({ type: 'tool_call', call: c })),
+  { type: 'done', stopReason: 'tool_calls' },
+];
+
 function makeSession(
   provider: ProviderAdapter,
   toolCtx: ToolContext,
@@ -95,6 +100,30 @@ async function collectEvents(gen: AsyncGenerator<AgentEvent>): Promise<AgentEven
   const out: AgentEvent[] = [];
   for await (const ev of gen) out.push(ev);
   return out;
+}
+
+import type { Tool } from '../src/tools/types.js';
+
+/** Read-only tool that blocks until released, recording enter/exit order. */
+function barrierTool(name: string, log: string[]): { tool: Tool; releaseAll: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const tool: Tool = {
+    name,
+    isReadOnly: true,
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+    description: () => name,
+    summarize: (input) => String(input.id ?? ''),
+    async call(input) {
+      log.push(`enter ${input.id}`);
+      await gate;
+      log.push(`exit ${input.id}`);
+      return { ok: true, output: `done ${input.id}` };
+    },
+  };
+  return { tool, releaseAll: release };
 }
 
 describe('runTurn', () => {
@@ -438,5 +467,49 @@ describe('runTurn', () => {
     const guard = events.find((e) => e.type === 'guard');
     expect(guard?.message).toContain('unparseable');
     expect(provider.received).toHaveLength(3);
+  });
+});
+
+describe('parallel tool execution', () => {
+  it('runs a read-only batch concurrently and appends results in call order', async () => {
+    const { ctx } = tmpCtx();
+    const log: string[] = [];
+    const { tool, releaseAll } = barrierTool('SlowRead', log);
+    const provider = new ScriptedProvider([
+      twoToolStep(call('a', 'SlowRead', { id: 'A' }), call('b', 'SlowRead', { id: 'B' })),
+      textStep('both done'),
+    ]);
+    const session = makeSession(provider, ctx);
+    session.registry.register(tool);
+
+    const run = collectEvents(runTurn(session, 'read both'));
+    // Give both calls a tick to enter, then release. If execution were
+    // sequential, only A would have entered before the release.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(log).toEqual(['enter A', 'enter B']);
+    releaseAll();
+    await run;
+
+    const toolMsgs = provider.received[1].messages.filter((m) => m.role === 'tool');
+    expect(toolMsgs.map((m) => m.toolCallId)).toEqual(['a', 'b']); // order preserved
+    expect(toolMsgs[0].content).toContain('done A');
+    expect(toolMsgs[1].content).toContain('done B');
+  });
+
+  it('keeps a batch sequential when it contains a mutation', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'v1' });
+    const provider = new ScriptedProvider([
+      twoToolStep(
+        call('r', 'Read', { file_path: 'a.ts' }),
+        call('w', 'Write', { file_path: 'b.ts', content: 'new' }),
+      ),
+      textStep('done'),
+    ]);
+    const session = makeSession(provider, ctx);
+    const events = await collectEvents(runTurn(session, 'read and write'));
+    // Both still execute and succeed; the point is correctness, not timing.
+    expect(events.filter((e) => e.type === 'tool_end' && e.ok)).toHaveLength(2);
+    expect(fs.readFileSync(path.join(dir, 'b.ts'), 'utf8')).toBe('new');
   });
 });

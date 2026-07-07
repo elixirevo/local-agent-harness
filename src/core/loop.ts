@@ -162,28 +162,45 @@ export async function* runTurn(
 
     if (calls.length === 0) return;
 
-    // Execute sequentially (local models are unreliable at parallel calls and
-    // local inference gains nothing from concurrency). Every tool_call gets a
-    // matching result even after a guard abort, to keep the protocol valid.
-    let abortTurn = false;
-    for (const call of calls) {
-      let output: string;
-      let ok = false;
-      if (abortTurn) {
-        output = toolError('skipped: the turn was stopped by a loop guard.');
-      } else {
-        const outcome = await executeCall(session, guard, call);
-        output = outcome.output;
-        ok = outcome.ok;
-        abortTurn = outcome.abortTurn;
-        yield { type: 'tool_start', name: call.name, summary: outcome.summary };
-        yield { type: 'tool_end', name: call.name, ok, summary: outcome.display };
-      }
+    const appendResult = (call: ToolCall, output: string): void => {
       if (session.protocol === 'native') {
         session.messages.push({ role: 'tool', content: output, toolCallId: call.id });
       } else {
         const note = extra ? '\n\n(note: only the first tool call was executed — one per response)' : '';
         session.messages.push({ role: 'user', content: formatTextToolResult(call.name, output) + note });
+      }
+    };
+
+    // A batch of purely read-only calls (parallel reads/greps, or explore
+    // subagents) is safe to run concurrently: reads don't change state, so the
+    // guard's clear-on-mutation never races and result ordering is preserved
+    // by appending in call order. Anything with a mutation stays sequential —
+    // ordering and the guard's state reset both matter there.
+    let abortTurn = false;
+    if (calls.length > 1 && calls.every((c) => isParallelSafe(session, c))) {
+      for (const call of calls) {
+        yield { type: 'tool_start', name: call.name, summary: summarizeCall(session, call) };
+      }
+      const outcomes = await Promise.all(calls.map((c) => executeCall(session, guard, c)));
+      for (let i = 0; i < calls.length; i++) {
+        const outcome = outcomes[i];
+        yield { type: 'tool_end', name: calls[i].name, ok: outcome.ok, summary: outcome.display };
+        appendResult(calls[i], outcome.output);
+        if (outcome.abortTurn) abortTurn = true;
+      }
+    } else {
+      // Every tool_call gets a matching result even after a guard abort, to
+      // keep the message protocol valid.
+      for (const call of calls) {
+        if (abortTurn) {
+          appendResult(call, toolError('skipped: the turn was stopped by a loop guard.'));
+          continue;
+        }
+        const outcome = await executeCall(session, guard, call);
+        abortTurn = outcome.abortTurn;
+        yield { type: 'tool_start', name: call.name, summary: outcome.summary };
+        yield { type: 'tool_end', name: call.name, ok: outcome.ok, summary: outcome.display };
+        appendResult(call, outcome.output);
       }
     }
     if (abortTurn) {
@@ -194,6 +211,22 @@ export async function* runTurn(
       return;
     }
   }
+}
+
+/** Whether a call touches no state, so it can run concurrently with siblings. */
+function isParallelSafe(session: AgentSession, call: ToolCall): boolean {
+  const tool = session.registry.get(call.name);
+  if (!tool) return false;
+  const input = parseArguments(call.arguments);
+  if (input === undefined) return false;
+  const risk = tool.riskOf?.(input, session.toolCtx) ?? (tool.isReadOnly ? 'read' : 'mutate');
+  return risk === 'read';
+}
+
+function summarizeCall(session: AgentSession, call: ToolCall): string {
+  const tool = session.registry.get(call.name);
+  const input = parseArguments(call.arguments);
+  return tool && input ? tool.summarize(input, session.toolCtx) : call.name;
 }
 
 interface MaintainResult {
