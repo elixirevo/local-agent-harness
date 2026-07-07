@@ -63,29 +63,104 @@ export const editTool: Tool = {
     }
 
     const text = fs.readFileSync(abs, 'utf8');
-    const count = text.split(oldString).length - 1;
-    if (count === 0) {
+    const match = findTarget(text, oldString);
+    if (match.kind === 'none') {
       return err(
         'old_string was not found in the file. It must match exactly, including whitespace and indentation, without the line-number prefixes from Read. Read the file again to get the current content.',
       );
     }
+    if (match.kind === 'ambiguous') {
+      return err(
+        'old_string does not match exactly and matches multiple locations when ignoring whitespace. Include more surrounding lines to pin down one location.',
+      );
+    }
+    const target = match.target;
+    const count = text.split(target).length - 1;
     if (count > 1 && !replaceAll) {
       return err(
         `old_string appears ${count} times in the file. Include more surrounding lines to make it unique, or set replace_all=true to replace all ${count} occurrences.`,
       );
     }
 
-    const updated = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, newString);
+    const updated = replaceAll ? text.split(target).join(newString) : text.replace(target, newString);
     fs.writeFileSync(abs, updated, 'utf8');
     ctx.readFiles.set(abs, fs.statSync(abs).mtimeMs);
 
+    const n = replaceAll ? count : 1;
     return {
       ok: true,
-      output: `Edited ${abs} (${replaceAll ? count : 1} replacement${count > 1 && replaceAll ? 's' : ''}).\n\n${snippetAround(updated, newString)}`,
-      display: `${replaceAll ? count : 1} replacement${replaceAll && count > 1 ? 's' : ''}`,
+      output: `Edited ${abs} (${n} replacement${n > 1 ? 's' : ''})${match.note}.\n\n${snippetAround(updated, newString)}`,
+      display: `${n} replacement${n > 1 ? 's' : ''}${match.note ? ' (recovered match)' : ''}`,
     };
   },
 };
+
+type TargetMatch =
+  | { kind: 'found'; target: string; note: string }
+  | { kind: 'none' }
+  | { kind: 'ambiguous' };
+
+/**
+ * Recovery ladder for the dominant small-model failure ("old_string not
+ * found"): 1) exact match, 2) exact match after stripping the line-number
+ * prefixes that models copy from Read output, 3) unique line-window match
+ * ignoring per-line surrounding whitespace. Silent leniency here beats an
+ * error loop; the result notes when a recovery kicked in so the model learns.
+ */
+function findTarget(text: string, oldString: string): TargetMatch {
+  if (text.includes(oldString)) return { kind: 'found', target: oldString, note: '' };
+
+  const stripped = stripLinePrefixes(oldString);
+  if (stripped !== oldString && text.includes(stripped)) {
+    return {
+      kind: 'found',
+      target: stripped,
+      note: ' (matched after removing line-number prefixes from old_string — never include them)',
+    };
+  }
+
+  const fuzzy = trimmedWindowMatch(text, stripped);
+  if (fuzzy === 'multiple') return { kind: 'ambiguous' };
+  if (fuzzy !== 'none') {
+    return {
+      kind: 'found',
+      target: fuzzy,
+      note: ' (matched ignoring surrounding whitespace — send exact content next time)',
+    };
+  }
+  return { kind: 'none' };
+}
+
+function stripLinePrefixes(s: string): string {
+  return s
+    .split('\n')
+    .map((l) => l.replace(/^\s{0,6}\d+(\t| {2,})/, ''))
+    .join('\n');
+}
+
+/** Unique window of file lines equal to the old lines after per-line trim. */
+function trimmedWindowMatch(text: string, oldString: string): string | 'none' | 'multiple' {
+  const oldLines = oldString.split('\n').map((l) => l.trim());
+  while (oldLines.length > 0 && oldLines[0] === '') oldLines.shift();
+  while (oldLines.length > 0 && oldLines[oldLines.length - 1] === '') oldLines.pop();
+  if (oldLines.length === 0) return 'none';
+
+  const fileLines = text.split('\n');
+  const hits: number[] = [];
+  for (let i = 0; i + oldLines.length <= fileLines.length; i++) {
+    let matches = true;
+    for (let k = 0; k < oldLines.length; k++) {
+      if (fileLines[i + k].trim() !== oldLines[k]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) hits.push(i);
+  }
+  if (hits.length === 0) return 'none';
+  if (hits.length > 1) return 'multiple';
+  return fileLines.slice(hits[0], hits[0] + oldLines.length).join('\n');
+}
 
 /** Line-numbered context around the first replacement so the model can verify. */
 function snippetAround(text: string, needle: string): string {

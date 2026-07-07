@@ -132,6 +132,46 @@ describe('Edit', () => {
     expect(res.output).toContain('unexpectedly modified');
   });
 
+  it('recovers old_string that includes line-number prefixes from Read', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'function add(a, b) {\n  return a - b;\n}\n' });
+    await readFirst(dir, ctx);
+    const res = await editTool.call(
+      {
+        file_path: 'a.ts',
+        old_string: '     1\tfunction add(a, b) {\n     2\t  return a - b;\n     3\t}',
+        new_string: 'function add(a, b) {\n  return a + b;\n}',
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(res.output).toContain('line-number prefixes');
+    expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toContain('a + b');
+  });
+
+  it('recovers a whitespace-mismatched old_string when the match is unique', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'if (x) {\n\treturn a - b;\n}\n' }); // tab-indented file
+    await readFirst(dir, ctx);
+    const res = await editTool.call(
+      // model guesses two-space indentation — not a substring of the file
+      { file_path: 'a.ts', old_string: 'if (x) {\n  return a - b;\n}', new_string: 'if (x) {\n\treturn a + b;\n}' },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(res.output).toContain('ignoring surrounding whitespace');
+    expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('if (x) {\n\treturn a + b;\n}\n');
+  });
+
+  it('rejects whitespace-relaxed matches that are ambiguous', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': '  foo();\n\tfoo();\n' });
+    await readFirst(dir, ctx);
+    const res = await editTool.call({ file_path: 'a.ts', old_string: '    foo();', new_string: 'bar();' }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain('multiple locations');
+  });
+
   it('allows consecutive edits without re-reading (mtime tracked through edits)', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'one two three' });
