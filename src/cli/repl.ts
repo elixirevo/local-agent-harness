@@ -3,8 +3,10 @@ import { compactSession } from '../compact/compact.js';
 import { budgetStatus } from '../context/budget.js';
 import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import { effectiveContextLength, type HarnessConfig } from '../config/config.js';
+import type { McpConnection } from '../mcp/index.js';
 import { resolveProfile } from '../models/profile.js';
-import { PermissionGate, type AskFn } from '../permissions/gate.js';
+import { PermissionGate, type AskFn, type PermissionMode } from '../permissions/gate.js';
+import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
 import type { SessionStore } from '../session/store.js';
@@ -13,6 +15,12 @@ export interface CliSession extends AgentSession {
   providerName: string;
   config: HarnessConfig;
   store?: SessionStore;
+  /** The permission mode outside plan mode (plan swaps the gate temporarily). */
+  baseMode: PermissionMode;
+  planMode: boolean;
+  /** Interactive approval hook, kept so plan-mode toggles can rebuild the gate. */
+  askFn?: AskFn;
+  mcp?: McpConnection[];
 }
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -161,7 +169,10 @@ function printError(session: CliSession, err: unknown): void {
 
 export async function oneShot(session: CliSession, prompt: string): Promise<void> {
   // Non-interactive: "ask" cannot prompt, so mutations are denied with a hint.
-  session.gate = new PermissionGate(session.gate.mode, session.toolCtx.cwd, undefined);
+  // Plan mode keeps its own gate (plan-file exception included).
+  if (!session.planMode) {
+    session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, undefined);
+  }
   await chatTurn(session, prompt);
 }
 
@@ -231,7 +242,10 @@ export async function runRepl(session: CliSession): Promise<void> {
         return ['y', 'yes'].includes((answer ?? '').trim().toLowerCase());
       }
     : undefined;
-  session.gate = new PermissionGate(session.gate.mode, session.toolCtx.cwd, ask);
+  session.askFn = ask;
+  if (!session.planMode) {
+    session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, ask);
+  }
 
   let currentAbort: AbortController | null = null;
   rl.on('SIGINT', () => {
@@ -267,7 +281,8 @@ export async function runRepl(session: CliSession): Promise<void> {
 function toolsLine(session: CliSession): string {
   if (session.protocol === 'none') return 'tools: disabled (--protocol none)';
   const names = session.registry.list(session.gate.mode).map((t) => t.name);
-  return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}`;
+  const plan = session.planMode ? ' · PLAN MODE' : '';
+  return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}${plan}`;
 }
 
 function printBanner(session: CliSession): void {
@@ -287,6 +302,8 @@ const HELP = `commands:
   /models             list models on the current provider
   /model <id>         switch model (re-resolves its profile)
   /provider <name>    switch provider (configured in harness.config.json)
+  /plan               toggle plan mode (read-only + a single plan file)
+  /mcp                list connected MCP servers and their tools
   /session            show where this conversation is being saved
   /context            show the context budget estimate
   /compact            summarize the conversation now to free context
@@ -304,6 +321,34 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
     case '/help':
       console.log(HELP);
       return false;
+    case '/plan': {
+      const planFile = planFilePath(session.toolCtx.cwd);
+      session.planMode = !session.planMode;
+      if (session.planMode) {
+        session.gate = new PermissionGate('plan', session.toolCtx.cwd, undefined, planFile);
+        session.reminders.enqueue(planModeEnterReminder(planFile));
+        console.log(dim(`plan mode ON — mutations restricted to ${planFile}`));
+      } else {
+        session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, session.askFn);
+        session.reminders.enqueue(planModeExitReminder(planFile));
+        console.log(dim(`plan mode OFF (permission mode: ${session.baseMode})`));
+      }
+      return false;
+    }
+    case '/mcp': {
+      if (!session.mcp || session.mcp.length === 0) {
+        console.log(dim('(no MCP servers configured — add mcpServers to harness.config.json)'));
+        return false;
+      }
+      for (const c of session.mcp) {
+        if (c.error) console.log(`${c.client.name}: ${dim(`connection failed — ${c.error}`)}`);
+        else
+          console.log(
+            `${c.client.name} (${c.client.serverInfo?.name ?? '?'}): ${c.toolNames.length ? c.toolNames.join(', ') : dim('(no tools)')}`,
+          );
+      }
+      return false;
+    }
     case '/session':
       console.log(session.store ? session.store.file : dim('(session saving is disabled)'));
       return false;

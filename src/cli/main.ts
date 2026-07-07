@@ -5,8 +5,10 @@ import { ReminderQueue } from '../context/reminders.js';
 import { startupContext } from '../context/startup.js';
 import { effectiveContextLength, loadConfig } from '../config/config.js';
 import { resolveProfile, type PromptTier } from '../models/profile.js';
+import { closeMcpConnections, connectMcpServers, type McpConnection } from '../mcp/index.js';
 import { PermissionGate, PERMISSION_MODES, type PermissionMode } from '../permissions/gate.js';
 import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
+import { planFilePath, planModeEnterReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { ChatMessage } from '../providers/types.js';
 import { loadSession, newSessionId, SessionStore } from '../session/store.js';
@@ -30,6 +32,8 @@ Options:
                                ask: mutations ask y/N (Bash read-only commands run freely)
                                auto: mutations in the working dir run without asking;
                                destructive commands always ask
+      --plan                   start in plan mode: read-only exploration, mutations
+                               allowed only in .harness/plan.md (toggle with /plan)
       --protocol <p>           native | text | none — force the tool protocol
                                (default: native if the model profile supports it, else text)
       --tier <t>               minimal | standard | full — system prompt tier
@@ -57,6 +61,7 @@ async function main(): Promise<void> {
       model: { type: 'string', short: 'm' },
       prompt: { type: 'string', short: 'p' },
       'permission-mode': { type: 'string', short: 'M' },
+      plan: { type: 'boolean' },
       protocol: { type: 'string' },
       tier: { type: 'string' },
       resume: { type: 'string' },
@@ -140,6 +145,25 @@ async function main(): Promise<void> {
   const registry = defaultRegistry();
   const reminders = new ReminderQueue();
 
+  // Every tool must be registered BEFORE the system prompt is built — the
+  // text-protocol section embeds the tool list at build time.
+  // The subagent getter reads the live session so /model switches apply.
+  registry.register(
+    createAgentTool(() => ({
+      provider: session.provider,
+      config: session.config,
+      cwd,
+      parentModel: session.model,
+    })),
+  );
+  let mcp: McpConnection[] = [];
+  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+    mcp = await connectMcpServers(config.mcpServers, registry);
+    for (const c of mcp) {
+      if (c.error) console.error(`warning: MCP server "${c.client.name}": ${c.error}`);
+    }
+  }
+
   let messages: ChatMessage[];
   if (resumed) {
     messages = resumed.messages;
@@ -176,15 +200,9 @@ async function main(): Promise<void> {
     }
   }
 
-  // The subagent inherits the live session state so /model switches apply.
-  registry.register(
-    createAgentTool(() => ({
-      provider: session.provider,
-      config: session.config,
-      cwd,
-      parentModel: session.model,
-    })),
-  );
+  const planMode = values.plan === true;
+  const planFile = planFilePath(cwd);
+  if (planMode) reminders.enqueue(planModeEnterReminder(planFile));
 
   const session: CliSession = {
     provider,
@@ -197,7 +215,9 @@ async function main(): Promise<void> {
     messages,
     registry,
     // The REPL swaps in a gate wired to its readline for interactive approval.
-    gate: new PermissionGate(mode, cwd, undefined),
+    gate: planMode
+      ? new PermissionGate('plan', cwd, undefined, planFile)
+      : new PermissionGate(mode, cwd, undefined),
     toolCtx: { cwd, readFiles: new Map() },
     maxSteps: config.maxSteps,
     protocol,
@@ -206,17 +226,27 @@ async function main(): Promise<void> {
     compaction: config.compaction,
     transcriptPath: store?.file,
     onCompacted: (compacted) => store?.recordCompaction(compacted),
+    baseMode: mode,
+    planMode,
+    mcp,
   };
 
-  if (values.prompt !== undefined) {
-    try {
-      await oneShot(session, values.prompt);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      die(msg.includes('fetch failed') ? friendlyFetchError(providerName, providerCfg.baseUrl, err) : msg);
+  try {
+    if (values.prompt !== undefined) {
+      try {
+        await oneShot(session, values.prompt);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          msg.includes('fetch failed') ? friendlyFetchError(providerName, providerCfg.baseUrl, err) : msg,
+        );
+        process.exitCode = 1;
+      }
+    } else {
+      await runRepl(session);
     }
-  } else {
-    await runRepl(session);
+  } finally {
+    closeMcpConnections(mcp);
   }
 }
 

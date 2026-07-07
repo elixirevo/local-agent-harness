@@ -3,9 +3,11 @@
 로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM) 위에서 동작하는 에이전트 하네스.
 설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md) 참조.
 
-**현재 상태: Phase 4** — 에이전트 루프 + 도구 7종(Read/Write/Edit/Glob/Grep/Bash/**Agent**) + 권한 게이트(명령 위험 분류) +
-루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 + 텍스트 프로토콜 폴백 + 세션 저장/복원 +
-컨텍스트 수명 관리(토큰 예산, FRC, 자동 압축) + **서브에이전트(Explore/Verify)** + **평가 하네스(`harness eval`)**.
+**현재 상태: Phase 5** — 에이전트 루프 + 도구 7종+MCP(Read/Write/Edit/Glob/Grep/Bash/Agent + `mcp__*`) +
+권한 게이트(명령 위험 분류) + 루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 +
+텍스트 프로토콜 폴백 + 세션 저장/복원 + 컨텍스트 수명 관리(캘리브레이션된 토큰 예산, FRC, 자동 압축,
+grammar 강제 재시도) + 서브에이전트(Explore/Verify) + **계획 모드** + **MCP 클라이언트** +
+평가 하네스(`harness eval`).
 
 ## 요구사항
 
@@ -60,6 +62,30 @@ Phase 1에서 네이티브 도구 호출에 실패했던 llama3.2(3B)가 이 프
 대화 시작 시 날짜·git 스냅샷(2000자 잘림)·프로젝트 메모리(AGENTS.md 또는 CLAUDE.md)가
 `<system-reminder>`로 첫 메시지에 주입된다("관련 없을 수 있음" 프레이밍 포함). 리마인더는
 항상 대화 꼬리에만 붙어 프리픽스 캐시를 깨지 않는다.
+
+## 계획 모드
+
+`--plan` 플래그 또는 REPL `/plan` 토글. 문서의 패턴대로 "아직 실행하지 말 것"을 최우선
+리마인더로 주입하고, 코드로도 강제한다: 모든 변이가 거부되며 **유일한 예외는 계획 파일**
+(`.harness/plan.md`)의 Write/Edit다. 읽기 도구와 read 분류 Bash(git status 등)로 탐색하며
+계획을 다듬은 뒤, `/plan`으로 해제하면 실행 허용 리마인더가 주입된다.
+
+## MCP 서버 연결
+
+config에 stdio MCP 서버를 등록하면 그 도구들이 `mcp__서버명__도구명`으로 모델에 제공된다:
+
+```json
+{
+  "mcpServers": {
+    "notes": { "command": "node", "args": ["./my-mcp-server.js"] }
+  }
+}
+```
+
+- 서버의 `readOnlyHint` 어노테이션이 있는 도구만 read로 취급(readonly 모드에 노출, ask 모드
+  자동 허용); 나머지는 변이로 게이트를 통과해야 한다.
+- 서버별 연결 실패는 경고로 격리된다. `/mcp`로 연결 상태·도구 목록 확인.
+- 스키마는 서버 원본을 모델에 그대로 전달하고, 로컬 검증은 아는 타입만 확인한다(서버가 최종 권위).
 
 ## 서브에이전트 (Agent 도구)
 
