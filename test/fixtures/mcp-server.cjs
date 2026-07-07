@@ -3,6 +3,7 @@
 // Tools: echo (readOnlyHint), slow (never answers within test timeouts),
 // boom (isError result).
 let buffer = '';
+let pendingPingCall = null; // tools/call id waiting for the client's pong
 
 process.stdin.on('data', (chunk) => {
   buffer += chunk.toString('utf8');
@@ -20,6 +21,14 @@ function send(message) {
 
 function handle(message) {
   const { id, method, params } = message;
+  // Client's response to our server-initiated ping.
+  if (method === undefined && id === 'server-ping-1') {
+    if (pendingPingCall !== null) {
+      send({ jsonrpc: '2.0', id: pendingPingCall, result: { content: [{ type: 'text', text: 'pong received' }] } });
+      pendingPingCall = null;
+    }
+    return;
+  }
   if (method === 'initialize') {
     send({
       jsonrpc: '2.0',
@@ -63,6 +72,11 @@ function handle(message) {
             description: 'Never answers in time.',
             inputSchema: { type: 'object', properties: {} },
           },
+          {
+            name: 'check_ping',
+            description: 'Sends the client a ping and reports whether it answered.',
+            inputSchema: { type: 'object', properties: {} },
+          },
         ],
       },
     });
@@ -88,6 +102,10 @@ function handle(message) {
       });
     } else if (name === 'slow') {
       // deliberately never respond
+    } else if (name === 'check_ping') {
+      // Ping the client; the tools/call result is sent once it pongs.
+      pendingPingCall = id;
+      send({ jsonrpc: '2.0', id: 'server-ping-1', method: 'ping' });
     } else {
       send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'unknown tool: ' + name } });
     }

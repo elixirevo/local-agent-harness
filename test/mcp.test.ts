@@ -28,7 +28,7 @@ describe('McpClient', () => {
     expect(client.serverInfo?.name).toBe('fixture-server');
 
     const tools = await client.listTools();
-    expect(tools.map((t) => t.name)).toEqual(['echo', 'write_note', 'boom', 'slow']);
+    expect(tools.map((t) => t.name)).toEqual(['echo', 'write_note', 'boom', 'slow', 'check_ping']);
     expect(tools[0].annotations?.readOnlyHint).toBe(true);
 
     const result = await client.callTool('echo', { text: 'hello' });
@@ -50,6 +50,14 @@ describe('McpClient', () => {
     const pending = client.callTool('slow', {});
     client.close(); // simulates a dying server mid-call
     await expect(pending).rejects.toThrow(/closed|exited/);
+  });
+
+  it('answers server-initiated ping requests', async () => {
+    const client = makeClient();
+    await client.connect();
+    // check_ping makes the server ping us and only returns once we pong.
+    const result = await client.callTool('check_ping', {});
+    expect(result).toEqual({ text: 'pong received', isError: false });
   });
 });
 

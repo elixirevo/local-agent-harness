@@ -142,8 +142,23 @@ export class McpClient {
         } else {
           entry.resolve(message.result);
         }
+      } else if (typeof message.method === 'string' && message.id !== undefined) {
+        this.handleServerRequest(message.id, message.method);
       }
-      // Server-initiated requests/notifications are ignored in v1.
+      // Other server-initiated notifications are ignored in v1.
+    }
+  }
+
+  /**
+   * Answer the server-initiated requests a long-lived server relies on.
+   * ping keeps the connection healthy; anything else (sampling, roots) is
+   * declined with a method-not-found so the server doesn't hang waiting.
+   */
+  private handleServerRequest(id: number, method: string): void {
+    if (method === 'ping') {
+      this.send({ jsonrpc: '2.0', id, result: {} });
+    } else {
+      this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: `unsupported: ${method}` } });
     }
   }
 
