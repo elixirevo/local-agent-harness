@@ -262,6 +262,24 @@ describe('runTurn', () => {
     expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('v2');
   });
 
+  it('unblocks a failed Edit after the model satisfies the Read precondition', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'const RETRIES = 3;' });
+    const edit = () =>
+      toolStep(call('c', 'Edit', { file_path: 'a.ts', old_string: 'RETRIES = 3', new_string: 'RETRIES = 5' }));
+    const provider = new ScriptedProvider([
+      edit(), // fails: not read yet
+      toolStep(call('r', 'Read', { file_path: 'a.ts' })), // satisfies the precondition
+      edit(), // identical retry — outcome now differs, must RUN not intercept
+      textStep('done'),
+    ]);
+    const session = makeSession(provider, ctx);
+    const events = await collectEvents(runTurn(session, 'bump retries'));
+    const ends = events.filter((e) => e.type === 'tool_end');
+    expect(ends.map((e) => e.ok)).toEqual([false, true, true]);
+    expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('const RETRIES = 5;');
+  });
+
   it('intercepts an identical retry of a failed call', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'hello' });

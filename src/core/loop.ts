@@ -310,7 +310,11 @@ async function executeCall(
   // Only a mutation that actually executed changes state and resets what
   // "identical" means; failed or denied calls are recorded so retries trip
   // the repeat guard.
-  guard.record(key, outcome.ok && tool !== undefined && !tool.isReadOnly);
+  guard.record(key, {
+    stateChanged: outcome.ok && tool !== undefined && !tool.isReadOnly,
+    ok: outcome.ok,
+    path: typeof input?.file_path === 'string' ? (input.file_path as string) : undefined,
+  });
   return outcome;
 }
 
@@ -394,8 +398,7 @@ function firstLine(s: string): string {
  * executed mutation resets the notion of "identical" (state actually moved).
  */
 class RepeatGuard {
-  /** key → whether that call was a successfully executed mutation. */
-  private seen = new Map<string, boolean>();
+  private seen = new Map<string, { succeededMutation: boolean; ok: boolean; path?: string }>();
   private intercepts = 0;
 
   keyFor(call: ToolCall, input: Record<string, unknown> | undefined): string {
@@ -407,19 +410,28 @@ class RepeatGuard {
   }
 
   checkRepeat(key: string): { verdict: 'run' | 'intercept' | 'abort'; succeededBefore: boolean } {
-    if (this.seen.has(key)) {
+    const entry = this.seen.get(key);
+    if (entry) {
       this.intercepts++;
       return {
         verdict: this.intercepts >= 3 ? 'abort' : 'intercept',
-        succeededBefore: this.seen.get(key) === true,
+        succeededBefore: entry.succeededMutation,
       };
     }
     return { verdict: 'run', succeededBefore: false };
   }
 
-  record(key: string, stateChanged: boolean): void {
-    if (stateChanged) this.seen.clear();
-    this.seen.set(key, stateChanged);
+  record(key: string, info: { stateChanged: boolean; ok: boolean; path?: string }): void {
+    if (info.stateChanged) this.seen.clear();
+    if (info.ok && info.path !== undefined) {
+      // A successful call on a file can satisfy the precondition an earlier
+      // call failed on (the fail-Edit → Read → retry-Edit sequence): the
+      // retry's outcome is no longer "identical", so unblock it.
+      for (const [k, v] of this.seen) {
+        if (!v.ok && v.path === info.path) this.seen.delete(k);
+      }
+    }
+    this.seen.set(key, { succeededMutation: info.stateChanged, ok: info.ok, path: info.path });
   }
 }
 
