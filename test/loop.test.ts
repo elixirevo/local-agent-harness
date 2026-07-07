@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { ReminderQueue } from '../src/context/reminders.js';
 import { runTurn, type AgentEvent, type AgentSession } from '../src/core/loop.js';
 import { resolveProfile } from '../src/models/profile.js';
 import { PermissionGate, type PermissionMode } from '../src/permissions/gate.js';
@@ -63,7 +64,12 @@ const textStep = (text: string): ChatChunk[] => [
 function makeSession(
   provider: ProviderAdapter,
   toolCtx: ToolContext,
-  opts: { mode?: PermissionMode; maxSteps?: number; ask?: (s: string) => Promise<boolean> } = {},
+  opts: {
+    mode?: PermissionMode;
+    maxSteps?: number;
+    ask?: (s: string) => Promise<boolean>;
+    protocol?: 'native' | 'text' | 'none';
+  } = {},
 ): AgentSession {
   const mode = opts.mode ?? 'auto';
   return {
@@ -77,6 +83,8 @@ function makeSession(
     gate: new PermissionGate(mode, toolCtx.cwd, opts.ask),
     toolCtx,
     maxSteps: opts.maxSteps ?? 20,
+    protocol: opts.protocol ?? 'native',
+    reminders: new ReminderQueue(),
   };
 }
 
@@ -258,6 +266,20 @@ describe('runTurn', () => {
     expect(provider.received[0].toolNames).toEqual(['Read', 'Glob', 'Grep']);
   });
 
+  it('prepends queued reminders to the next user message only', async () => {
+    const { ctx } = tmpCtx();
+    const provider = new ScriptedProvider([textStep('hi'), textStep('again')]);
+    const session = makeSession(provider, ctx);
+    session.reminders.enqueue('startup context here');
+    await collectEvents(runTurn(session, 'first'));
+    await collectEvents(runTurn(session, 'second'));
+    const users = provider.received[1].messages.filter((m) => m.role === 'user');
+    expect(users[0].content).toContain('<system-reminder>');
+    expect(users[0].content).toContain('startup context here');
+    expect(users[0].content).toContain('first');
+    expect(users[1].content).toBe('second'); // queue drained — no reminder repeated
+  });
+
   it('asks before auto-mode mutations that escape the working directory', async () => {
     const { dir, ctx } = tmpCtx();
     const asked: string[] = [];
@@ -278,12 +300,47 @@ describe('runTurn', () => {
     expect(fs.existsSync(outside)).toBe(false);
   });
 
-  it('sends no tools for profiles without native tool calls', async () => {
+  it('sends no native tool defs under the text protocol', async () => {
     const { ctx } = tmpCtx();
     const provider = new ScriptedProvider([textStep('plain chat')]);
-    const session = makeSession(provider, ctx);
-    session.profile = { ...session.profile, nativeToolCalls: false };
+    const session = makeSession(provider, ctx, { protocol: 'text' });
     await collectEvents(runTurn(session, 'hi'));
     expect(provider.received[0].toolNames).toEqual([]);
+  });
+
+  it('executes a text-protocol tool call and returns the result as a user message', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'const x = 1;' });
+    const provider = new ScriptedProvider([
+      textStep('Let me look.\n<tool_call>\n{"name": "Read", "arguments": {"file_path": "a.ts"}}\n</tool_call>'),
+      textStep('It defines x = 1.'),
+    ]);
+    const session = makeSession(provider, ctx, { protocol: 'text' });
+    const events = await collectEvents(runTurn(session, 'what is in a.ts?'));
+    expect(events.some((e) => e.type === 'tool_start' && e.name === 'Read')).toBe(true);
+
+    const second = provider.received[1].messages;
+    expect(second.some((m) => m.role === 'tool')).toBe(false); // no tool role in text protocol
+    const resultMsg = second.at(-1)!;
+    expect(resultMsg.role).toBe('user');
+    expect(resultMsg.content).toContain('<tool_result name="Read">');
+    expect(resultMsg.content).toContain('const x = 1;');
+    // the assistant message keeps its own tool_call block verbatim
+    expect(second.at(-2)?.content).toContain('<tool_call>');
+  });
+
+  it('sends a format reminder on malformed text calls and aborts after three', async () => {
+    const { ctx } = tmpCtx();
+    const bad = () => textStep('<tool_call>\n{not json at all\n</tool_call>');
+    const provider = new ScriptedProvider([bad(), bad(), bad(), textStep('never reached')]);
+    const session = makeSession(provider, ctx, { protocol: 'text' });
+    const events = await collectEvents(runTurn(session, 'go'));
+
+    const reminderMsg = provider.received[1].messages.at(-1)!;
+    expect(reminderMsg.role).toBe('user');
+    expect(reminderMsg.content).toContain('could not be parsed');
+    const guard = events.find((e) => e.type === 'guard');
+    expect(guard?.message).toContain('unparseable');
+    expect(provider.received).toHaveLength(3);
   });
 });

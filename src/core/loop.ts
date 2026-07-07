@@ -1,5 +1,8 @@
+import type { ReminderQueue } from '../context/reminders.js';
+import { systemReminder } from '../context/reminders.js';
 import type { ResolvedProfile } from '../models/profile.js';
 import type { PermissionGate } from '../permissions/gate.js';
+import type { ToolProtocol } from '../prompts/assemble.js';
 import type {
   ChatMessage,
   ProviderAdapter,
@@ -10,6 +13,7 @@ import type {
 import { parseArguments, validateInput } from '../tools/schema.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { Tool, ToolContext } from '../tools/types.js';
+import { extractTextToolCall, formatTextToolResult, FORMAT_REMINDER } from './textProtocol.js';
 
 export interface AgentSession {
   provider: ProviderAdapter;
@@ -23,6 +27,9 @@ export interface AgentSession {
   gate: PermissionGate;
   toolCtx: ToolContext;
   maxSteps: number;
+  /** How tools reach the model: native tool-calls, the text protocol, or not at all. */
+  protocol: ToolProtocol;
+  reminders: ReminderQueue;
 }
 
 export type AgentEvent =
@@ -31,9 +38,11 @@ export type AgentEvent =
   | { type: 'tool_start'; name: string; summary: string }
   | { type: 'tool_end'; name: string; ok: boolean; summary: string }
   | { type: 'step'; usage?: Usage; wallMs: number; stopReason: StopReason }
+  | { type: 'notice'; message: string }
   | { type: 'guard'; message: string };
 
 const MAX_TOOL_OUTPUT_CHARS = 30000;
+const MAX_MALFORMED_ATTEMPTS = 3;
 
 /**
  * One user turn: repeat model step → execute tool calls → feed results back,
@@ -45,12 +54,15 @@ export async function* runTurn(
   userInput: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AgentEvent> {
-  session.messages.push({ role: 'user', content: userInput });
+  session.reminders.tick();
+  session.messages.push({ role: 'user', content: session.reminders.drainPrefix() + userInput });
+
   const guard = new RepeatGuard();
-  const toolsEnabled = session.profile.nativeToolCalls;
-  const toolDefs = toolsEnabled
-    ? session.registry.toolDefs(session.gate.mode, session.profile.promptTier)
-    : [];
+  let malformedCount = 0;
+  const toolDefs =
+    session.protocol === 'native'
+      ? session.registry.toolDefs(session.gate.mode, session.profile.promptTier)
+      : [];
 
   for (let step = 0; ; step++) {
     if (step >= session.maxSteps) {
@@ -63,7 +75,7 @@ export async function* runTurn(
 
     const started = Date.now();
     let content = '';
-    const toolCalls: ToolCall[] = [];
+    const nativeCalls: ToolCall[] = [];
     let usage: Usage | undefined;
     let stopReason: StopReason = 'unknown';
 
@@ -86,7 +98,7 @@ export async function* runTurn(
           yield chunk;
           break;
         case 'tool_call':
-          toolCalls.push(chunk.call);
+          nativeCalls.push(chunk.call);
           break;
         case 'usage':
           usage = chunk.usage;
@@ -98,35 +110,67 @@ export async function* runTurn(
     }
     yield { type: 'step', usage, wallMs: Date.now() - started, stopReason };
 
+    // Resolve tool calls for this step: native chunks, or a text-protocol block.
+    let calls = nativeCalls;
+    let malformed: string | undefined;
+    let extra = false;
+    if (session.protocol === 'text' && calls.length === 0) {
+      const extraction = extractTextToolCall(content, step);
+      if (extraction.call) calls = [extraction.call];
+      else if (extraction.malformed !== undefined) malformed = extraction.malformed;
+      extra = extraction.extra;
+    }
+
+    // The assistant message keeps the raw content (including any text-protocol
+    // block) — the model must see its own call verbatim next step.
     const assistant: ChatMessage = { role: 'assistant', content };
-    if (toolCalls.length > 0) assistant.toolCalls = toolCalls;
+    if (session.protocol === 'native' && calls.length > 0) assistant.toolCalls = calls;
     session.messages.push(assistant);
 
-    if (toolCalls.length === 0 || stopReason === 'length' || stopReason === 'aborted') {
+    if (stopReason === 'length' || stopReason === 'aborted') {
       if (stopReason === 'length') yield { type: 'guard', message: 'hit max output length' };
       return;
     }
 
+    if (malformed !== undefined) {
+      malformedCount++;
+      if (malformedCount >= MAX_MALFORMED_ATTEMPTS) {
+        yield {
+          type: 'guard',
+          message: `stopped after ${MAX_MALFORMED_ATTEMPTS} unparseable tool calls — this model may be too weak for the text protocol`,
+        };
+        return;
+      }
+      yield { type: 'notice', message: 'malformed tool call — sent a format reminder' };
+      session.messages.push({ role: 'user', content: systemReminder(FORMAT_REMINDER) });
+      continue;
+    }
+
+    if (calls.length === 0) return;
+
     // Execute sequentially (local models are unreliable at parallel calls and
     // local inference gains nothing from concurrency). Every tool_call gets a
-    // matching tool result even after a guard abort, to keep the protocol valid.
+    // matching result even after a guard abort, to keep the protocol valid.
     let abortTurn = false;
-    for (const call of toolCalls) {
-      let result: string;
+    for (const call of calls) {
+      let output: string;
       let ok = false;
-      let display = '';
       if (abortTurn) {
-        result = toolError('skipped: the turn was stopped by a loop guard.');
+        output = toolError('skipped: the turn was stopped by a loop guard.');
       } else {
         const outcome = await executeCall(session, guard, call);
-        result = outcome.output;
+        output = outcome.output;
         ok = outcome.ok;
-        display = outcome.display;
         abortTurn = outcome.abortTurn;
         yield { type: 'tool_start', name: call.name, summary: outcome.summary };
-        yield { type: 'tool_end', name: call.name, ok, summary: display };
+        yield { type: 'tool_end', name: call.name, ok, summary: outcome.display };
       }
-      session.messages.push({ role: 'tool', content: result, toolCallId: call.id });
+      if (session.protocol === 'native') {
+        session.messages.push({ role: 'tool', content: output, toolCallId: call.id });
+      } else {
+        const note = extra ? '\n\n(note: only the first tool call was executed — one per response)' : '';
+        session.messages.push({ role: 'user', content: formatTextToolResult(call.name, output) + note });
+      }
     }
     if (abortTurn) {
       yield {
