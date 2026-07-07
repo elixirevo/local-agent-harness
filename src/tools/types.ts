@@ -31,6 +31,8 @@ export interface ToolContext {
   readFiles: Map<string, number>;
 }
 
+export type RiskLevel = 'read' | 'mutate' | 'destructive';
+
 export interface Tool {
   name: string;
   isReadOnly: boolean;
@@ -40,6 +42,8 @@ export interface Tool {
   summarize(input: Record<string, unknown>, ctx: ToolContext): string;
   /** Filesystem path this call mutates, for permission scoping. */
   pathOf?(input: Record<string, unknown>, ctx: ToolContext): string | undefined;
+  /** Per-call risk override (e.g. Bash classifies each command); defaults to isReadOnly. */
+  riskOf?(input: Record<string, unknown>, ctx: ToolContext): RiskLevel;
   call(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 

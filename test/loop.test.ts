@@ -94,7 +94,7 @@ describe('runTurn', () => {
     const events = await collectEvents(runTurn(session, 'question?'));
     expect(events.filter((e) => e.type === 'text')).toHaveLength(1);
     expect(session.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant']);
-    expect(provider.received[0].toolNames).toEqual(['Read', 'Write', 'Edit', 'Glob', 'Grep']);
+    expect(provider.received[0].toolNames).toEqual(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']);
   });
 
   it('executes a tool call, feeds the result back, and finishes', async () => {
@@ -140,12 +140,12 @@ describe('runTurn', () => {
 
   it('reports unknown tools with the available list', async () => {
     const { ctx } = tmpCtx();
-    const provider = new ScriptedProvider([toolStep(call('c1', 'Bash', { cmd: 'ls' })), textStep('ok')]);
+    const provider = new ScriptedProvider([toolStep(call('c1', 'Fetch', { url: 'x' })), textStep('ok')]);
     const session = makeSession(provider, ctx);
     await collectEvents(runTurn(session, 'go'));
     const toolMsg = provider.received[1].messages.find((m) => m.role === 'tool');
-    expect(toolMsg?.content).toContain('unknown tool "Bash"');
-    expect(toolMsg?.content).toContain('Read, Write, Edit, Glob, Grep');
+    expect(toolMsg?.content).toContain('unknown tool "Fetch"');
+    expect(toolMsg?.content).toContain('Read, Write, Edit, Glob, Grep, Bash');
   });
 
   it('intercepts identical repeated read-only calls and aborts after three', async () => {

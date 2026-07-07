@@ -1,6 +1,7 @@
 import type { PromptTier } from '../models/profile.js';
 import type { ToolDef } from '../providers/types.js';
 import type { PermissionMode } from '../permissions/gate.js';
+import { bashTool } from './bash.js';
 import { editTool } from './edit.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
@@ -49,5 +50,6 @@ export function defaultRegistry(): ToolRegistry {
     .register(writeTool)
     .register(editTool)
     .register(globTool)
-    .register(grepTool);
+    .register(grepTool)
+    .register(bashTool);
 }
