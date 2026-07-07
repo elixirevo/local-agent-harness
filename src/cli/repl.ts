@@ -157,6 +157,56 @@ export async function oneShot(session: CliSession, prompt: string): Promise<void
   await chatTurn(session, prompt);
 }
 
+/**
+ * Sequential line source over readline. Lines that arrive while a turn is
+ * being processed (always the case for piped stdin) are queued instead of
+ * dropped — rl.question() alone loses them, which silently broke piped
+ * multi-turn sessions. Both the main loop and permission prompts pull from
+ * this one queue, so they can never race for a line.
+ */
+class LineReader {
+  private queue: string[] = [];
+  private waiter: ((v: string | undefined) => void) | null = null;
+  private closed = false;
+
+  constructor(
+    private readonly rl: readline.Interface,
+    private readonly interactive: boolean,
+  ) {
+    rl.on('line', (line: string) => {
+      if (this.waiter) {
+        const w = this.waiter;
+        this.waiter = null;
+        w(line);
+      } else {
+        this.queue.push(line);
+      }
+    });
+    rl.on('close', () => {
+      this.closed = true;
+      if (this.waiter) {
+        const w = this.waiter;
+        this.waiter = null;
+        w(undefined);
+      }
+    });
+  }
+
+  /** Resolve the next line, or undefined at EOF/close. */
+  next(promptText: string): Promise<string | undefined> {
+    const queued = this.queue.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    if (this.closed) return Promise.resolve(undefined);
+    if (this.interactive) {
+      this.rl.setPrompt(promptText);
+      this.rl.prompt();
+    }
+    return new Promise((resolve) => {
+      this.waiter = resolve;
+    });
+  }
+}
+
 export async function runRepl(session: CliSession): Promise<void> {
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (interactive) printBanner(session);
@@ -166,10 +216,11 @@ export async function runRepl(session: CliSession): Promise<void> {
     output: interactive ? process.stdout : undefined,
     terminal: interactive,
   });
+  const reader = new LineReader(rl, interactive);
   const ask: AskFn | undefined = interactive
     ? async (summary) => {
-        const answer = await rl.question(`${bold('allow')} ${summary}? [y/N] `);
-        return ['y', 'yes'].includes(answer.trim().toLowerCase());
+        const answer = await reader.next(`${bold('allow')} ${summary}? [y/N] `);
+        return ['y', 'yes'].includes((answer ?? '').trim().toLowerCase());
       }
     : undefined;
   session.gate = new PermissionGate(session.gate.mode, session.toolCtx.cwd, ask);
@@ -185,12 +236,8 @@ export async function runRepl(session: CliSession): Promise<void> {
   });
 
   while (true) {
-    let line: string;
-    try {
-      line = await rl.question(interactive ? PROMPT : '');
-    } catch {
-      break; // interface closed (Ctrl+C at prompt, Ctrl+D, or stdin EOF)
-    }
+    const line = await reader.next(PROMPT);
+    if (line === undefined) break; // Ctrl+C at prompt, Ctrl+D, or stdin EOF
     const input = line.trim();
     if (!input) continue;
     if (input.startsWith('/')) {
