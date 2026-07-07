@@ -3,10 +3,9 @@
 로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM) 위에서 동작하는 에이전트 하네스.
 설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md) 참조.
 
-**현재 상태: Phase 3** — 에이전트 루프 + 도구 6종(Read/Write/Edit/Glob/Grep/Bash) + 권한 게이트(명령 위험 분류) +
+**현재 상태: Phase 4** — 에이전트 루프 + 도구 7종(Read/Write/Edit/Glob/Grep/Bash/**Agent**) + 권한 게이트(명령 위험 분류) +
 루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 + 텍스트 프로토콜 폴백 + 세션 저장/복원 +
-**컨텍스트 수명 관리**(토큰 예산, 오래된 도구 결과 클리어링, 자동 압축).
-서브에이전트와 평가 하네스는 Phase 4에서 추가된다.
+컨텍스트 수명 관리(토큰 예산, FRC, 자동 압축) + **서브에이전트(Explore/Verify)** + **평가 하네스(`harness eval`)**.
 
 ## 요구사항
 
@@ -61,6 +60,38 @@ Phase 1에서 네이티브 도구 호출에 실패했던 llama3.2(3B)가 이 프
 대화 시작 시 날짜·git 스냅샷(2000자 잘림)·프로젝트 메모리(AGENTS.md 또는 CLAUDE.md)가
 `<system-reminder>`로 첫 메시지에 주입된다("관련 없을 수 있음" 프레이밍 포함). 리마인더는
 항상 대화 꼬리에만 붙어 프리픽스 캐시를 깨지 않는다.
+
+## 서브에이전트 (Agent 도구)
+
+모델이 `Agent` 도구로 스코프가 제한된 중첩 에이전트에 작업을 위임할 수 있다:
+
+- **explore** — 읽기 전용 코드베이스 탐색(Read/Glob/Grep만, readonly 게이트로 이중 방어).
+  넓은 검색의 중간 결과가 메인 컨텍스트를 오염시키지 않게 한다. config `agents.exploreModel`로
+  탐색 전용 소형 모델을 지정할 수 있다.
+- **verify** — 적대적 검증("확인이 아니라 부수기"). Bash로 빌드/테스트를 실행하되 프로젝트
+  변이·파괴적 명령은 차단(auto 게이트 + 승인 불가 = 자동 거부). 보고서는
+  `VERDICT: PASS|FAIL|PARTIAL` 라인으로 끝나며 호출자가 파싱한다.
+
+서브에이전트는 다시 에이전트를 만들 수 없다(재귀 차단). 결과는 라벨 계약(`Scope:/Result:/Key files:`)으로 회수된다.
+
+## 평가 하네스 (harness eval)
+
+프롬프트·설정 변경을 감이 아니라 측정으로 검증한다:
+
+```bash
+npm start -- eval --model gemma4:e2b                  # 퀵 스위트 리포트
+npm start -- eval -h                                  # 옵션
+npm start -- eval --model gemma4:e2b --temp profile --temp 0.4   # 온도 매트릭스
+npm start -- eval --model llama3.2 --protocol text    # 프로토콜 강제
+npm start -- eval --list                              # 시나리오 목록
+```
+
+- 시나리오: edit/debug/multistep/search/agent 5종류(성공 판정은 모델 주장이 아니라
+  **프로그래매틱 검사** — 테스트 실행, 파일 내용 확인). `--heavy`로 장기 압축 시나리오 포함.
+- 매트릭스: `--model/--tier/--protocol/--temp`를 반복 지정하면 카테시안 곱으로 셀 구성.
+- 지표: 성공률, 스텝/도구 호출 수, 도구 에러, 파싱 실패(텍스트 프로토콜), 가드 발동,
+  압축 횟수, prefill ms/1k-tok, 벽시계 시간. 원자료는 `.harness/eval/*.json`에 저장(실패 진단용
+  답변 원문 포함).
 
 ## 컨텍스트 수명 관리
 

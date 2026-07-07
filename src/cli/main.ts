@@ -46,6 +46,11 @@ Options:
 Config: ./harness.config.json (optional; defaults target localhost servers)`;
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'eval') {
+    const { evalMain } = await import('../eval/main.js');
+    await evalMain(process.argv.slice(3));
+    return;
+  }
   const { values } = parseArgs({
     options: {
       provider: { type: 'string', short: 'P' },

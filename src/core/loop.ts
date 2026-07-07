@@ -46,7 +46,7 @@ export type AgentEvent =
   | { type: 'tool_start'; name: string; summary: string }
   | { type: 'tool_end'; name: string; ok: boolean; summary: string }
   | { type: 'step'; usage?: Usage; wallMs: number; stopReason: StopReason; contextPct?: number }
-  | { type: 'notice'; message: string }
+  | { type: 'notice'; message: string; kind?: 'malformed' | 'frc' | 'compact' }
   | { type: 'guard'; message: string };
 
 const MAX_TOOL_OUTPUT_CHARS = 30000;
@@ -83,7 +83,7 @@ export async function* runTurn(
     }
 
     const maintained = await maintainContext(session, toolDefs, !compactedThisTurn, signal);
-    for (const notice of maintained.notices) yield { type: 'notice', message: notice };
+    for (const notice of maintained.notices) yield { type: 'notice', ...notice };
     if (maintained.compacted) compactedThisTurn = true;
     const contextPct = maintained.pct;
 
@@ -155,7 +155,7 @@ export async function* runTurn(
         };
         return;
       }
-      yield { type: 'notice', message: 'malformed tool call — sent a format reminder' };
+      yield { type: 'notice', message: 'malformed tool call — sent a format reminder', kind: 'malformed' };
       session.messages.push({ role: 'user', content: systemReminder(FORMAT_REMINDER) });
       continue;
     }
@@ -197,7 +197,7 @@ export async function* runTurn(
 }
 
 interface MaintainResult {
-  notices: string[];
+  notices: Array<{ message: string; kind: 'frc' | 'compact' }>;
   pct: number;
   compacted: boolean;
 }
@@ -216,7 +216,7 @@ async function maintainContext(
 ): Promise<MaintainResult> {
   const settings = session.compaction;
   const pct = (u: number) => Math.round(u * 100);
-  const notices: string[] = [];
+  const notices: MaintainResult['notices'] = [];
   let compacted = false;
   let status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
   if (!settings.enabled) return { notices, pct: pct(status.usage), compacted };
@@ -236,9 +236,10 @@ async function maintainContext(
       }
     }
     if (cleared > 0) {
-      notices.push(
-        `context ~${pct(status.usage)}% — cleared ${cleared} old tool result${cleared > 1 ? 's' : ''}`,
-      );
+      notices.push({
+        message: `context ~${pct(status.usage)}% — cleared ${cleared} old tool result${cleared > 1 ? 's' : ''}`,
+        kind: 'frc',
+      });
     }
   }
 
@@ -260,9 +261,10 @@ async function maintainContext(
       session.toolCtx.readFiles.clear();
       session.onCompacted?.(result.messages);
       status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
-      notices.push(
-        `context ~${preUsage}% — compacted ~${result.beforeTokens} → ~${result.afterTokens} tok${result.degraded ? ' (summary failed validation — continuing with best effort)' : ''}${status.usage > 1 ? ' — still over budget; consider /clear' : ''}`,
-      );
+      notices.push({
+        message: `context ~${preUsage}% — compacted ~${result.beforeTokens} → ~${result.afterTokens} tok${result.degraded ? ' (summary failed validation — continuing with best effort)' : ''}${status.usage > 1 ? ' — still over budget; consider /clear' : ''}`,
+        kind: 'compact',
+      });
     }
   }
   return { notices, pct: pct(status.usage), compacted };
