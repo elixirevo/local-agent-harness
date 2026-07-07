@@ -69,6 +69,12 @@ function projectMemory(cwd: string): { source: string; content: string } | undef
       if (content.length > MEMORY_LIMIT) {
         content = `${content.slice(0, MEMORY_LIMIT)}\n... (truncated — Read ${name} for the rest)`;
       }
+      // Aging framing (docs pattern): stale notes asserted as live state cause
+      // confident wrong edits — say how old the file is.
+      const days = Math.floor((Date.now() - fs.statSync(file).mtimeMs) / 86_400_000);
+      if (days >= 1) {
+        content = `(note: this file is ${days} day${days > 1 ? 's' : ''} old — its claims are point-in-time notes, not live state; verify against the current code before relying on them)\n\n${content}`;
+      }
       return { source: name, content };
     } catch {
       continue;

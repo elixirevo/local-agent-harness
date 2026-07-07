@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ReminderQueue, systemReminder } from '../src/context/reminders.js';
 import { startupContext } from '../src/context/startup.js';
@@ -42,5 +44,21 @@ describe('startupContext', () => {
     const ctxText = startupContext(dir);
     expect(ctxText).toContain('# date');
     expect(ctxText).not.toContain('projectMemory');
+  });
+});
+
+describe('project memory aging', () => {
+  it('prefixes old AGENTS.md content with an age note', async () => {
+    const { dir } = tmpCtx();
+    seed(dir, { 'AGENTS.md': 'Use tabs everywhere.' });
+    const file = path.join(dir, 'AGENTS.md');
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+    fs.utimesSync(file, threeDaysAgo, threeDaysAgo);
+
+    const { startupContext } = await import('../src/context/startup.js');
+    const ctxText = startupContext(dir);
+    expect(ctxText).toContain('3 days old');
+    expect(ctxText).toContain('point-in-time notes');
+    expect(ctxText).toContain('Use tabs everywhere.');
   });
 });
