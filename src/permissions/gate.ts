@@ -1,7 +1,8 @@
 import path from 'node:path';
 import type { Tool, ToolContext } from '../tools/types.js';
 
-export type PermissionMode = 'readonly' | 'ask' | 'auto';
+/** 'plan' is entered via --plan//plan, not the --permission-mode flag. */
+export type PermissionMode = 'readonly' | 'ask' | 'auto' | 'plan';
 
 export const PERMISSION_MODES: PermissionMode[] = ['readonly', 'ask', 'auto'];
 
@@ -19,11 +20,23 @@ export class PermissionGate {
     readonly mode: PermissionMode,
     private readonly cwd: string,
     private readonly askFn?: AskFn,
+    /** In plan mode, the single file mutations are allowed to touch. */
+    private readonly planFile?: string,
   ) {}
 
   async check(tool: Tool, input: Record<string, unknown>, ctx: ToolContext): Promise<GateDecision> {
     const risk = tool.riskOf?.(input, ctx) ?? (tool.isReadOnly ? 'read' : 'mutate');
     if (risk === 'read') return { allowed: true };
+    if (this.mode === 'plan') {
+      const target = tool.pathOf?.(input, ctx);
+      if (this.planFile && target !== undefined && path.resolve(target) === path.resolve(this.planFile)) {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        reason: `plan mode is active — no execution or file changes yet. The ONLY file you may write is the plan file${this.planFile ? ` at ${this.planFile}` : ''}`,
+      };
+    }
     if (this.mode === 'readonly') {
       // Mutating tools are already excluded from the request in readonly mode;
       // this is the code half of the double defense.

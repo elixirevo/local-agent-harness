@@ -28,7 +28,9 @@ export class ToolRegistry {
   /**
    * Tools visible to the model under a permission mode. In readonly mode
    * mutating tools are excluded from the request itself (blocked by absence,
-   * not by prompt) — the gate stays as the second line of defense.
+   * not by prompt) — the gate stays as the second line of defense. Plan mode
+   * keeps every tool visible: the model must be able to Write/Edit the plan
+   * file, and the gate confines mutations to exactly that path.
    */
   list(mode: PermissionMode): Tool[] {
     const all = [...this.tools.values()];

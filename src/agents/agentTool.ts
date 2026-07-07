@@ -43,6 +43,11 @@ export function createAgentTool(deps: () => SubagentDeps): Tool {
       return `${input.agent_type}: ${p.length > 60 ? `${p.slice(0, 60)}…` : p}`;
     },
 
+    riskOf(input) {
+      // explore is read-only end to end; verify runs commands.
+      return input.agent_type === 'explore' ? 'read' : 'mutate';
+    },
+
     async call(input): Promise<ToolResult> {
       const type = input.agent_type as SubagentType;
       const prompt = input.prompt as string;
