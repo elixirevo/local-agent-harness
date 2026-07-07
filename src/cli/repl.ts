@@ -5,10 +5,12 @@ import { resolveProfile } from '../models/profile.js';
 import { PermissionGate, type AskFn } from '../permissions/gate.js';
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
+import type { SessionStore } from '../session/store.js';
 
 export interface CliSession extends AgentSession {
   providerName: string;
   config: HarnessConfig;
+  store?: SessionStore;
 }
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -100,6 +102,10 @@ function renderEvent(ev: AgentEvent, st: RenderState): void {
       st.sawThinking = false;
       st.startedText = false;
       break;
+    case 'notice':
+      ensureNewline(st);
+      write(dim(`[note] ${ev.message}`) + '\n');
+      break;
     case 'guard':
       ensureNewline(st);
       write(dim(`[guard] ${ev.message}`) + '\n');
@@ -118,6 +124,7 @@ async function chatTurn(session: CliSession, input: string, signal?: AbortSignal
   try {
     for await (const ev of runTurn(session, input, signal)) renderEvent(ev, st);
     ensureNewline(st);
+    session.store?.append(session.messages);
   } catch (err) {
     session.messages.length = snapshot;
     ensureNewline(st);
@@ -203,11 +210,9 @@ export async function runRepl(session: CliSession): Promise<void> {
 }
 
 function toolsLine(session: CliSession): string {
-  if (!session.profile.nativeToolCalls) {
-    return 'tools: disabled — this model has no native tool-call support (text-protocol fallback lands in Phase 2)';
-  }
+  if (session.protocol === 'none') return 'tools: disabled (--protocol none)';
   const names = session.registry.list(session.gate.mode).map((t) => t.name);
-  return `tools: ${names.join(', ')} · permission mode: ${session.gate.mode}`;
+  return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}`;
 }
 
 function printBanner(session: CliSession): void {
@@ -227,6 +232,7 @@ const HELP = `commands:
   /models             list models on the current provider
   /model <id>         switch model (re-resolves its profile)
   /provider <name>    switch provider (configured in harness.config.json)
+  /session            show where this conversation is being saved
   /clear              reset conversation (keeps system prompt)
   /exit               quit`;
 
@@ -240,6 +246,9 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
       return true;
     case '/help':
       console.log(HELP);
+      return false;
+    case '/session':
+      console.log(session.store ? session.store.file : dim('(session saving is disabled)'));
       return false;
     case '/clear':
       session.messages = session.messages.slice(0, 1);
@@ -269,8 +278,13 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
           `model → ${arg} (family ${session.profile.family} · ctx ${session.contextLength} · thinking ${session.profile.thinking})`,
         ),
       );
-      if (!session.profile.nativeToolCalls) {
-        console.log(dim('note: this model has no native tool-call support — tools are disabled for it'));
+      const wantsNative = session.profile.nativeToolCalls;
+      if ((session.protocol === 'native') !== wantsNative) {
+        console.log(
+          dim(
+            `note: this model ${wantsNative ? 'supports native tool calls' : 'has no native tool-call support'} but the session protocol is "${session.protocol}" (fixed at startup) — restart to change it`,
+          ),
+        );
       }
       return false;
     }

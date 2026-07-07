@@ -21,6 +21,8 @@ export interface HarnessConfig {
   permissionMode: PermissionMode;
   /** Model steps allowed per user turn before the loop guard stops. */
   maxSteps: number;
+  /** Persist conversations to .harness/sessions/*.jsonl (resume with --resume). */
+  saveSessions: boolean;
   /** Profile overrides keyed by exact model id or family name. */
   models?: Record<string, Partial<ModelProfile>>;
 }
@@ -43,6 +45,7 @@ const DEFAULTS: HarnessConfig = {
   contextLength: 32768,
   permissionMode: 'ask',
   maxSteps: 20,
+  saveSessions: true,
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';

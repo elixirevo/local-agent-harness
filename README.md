@@ -3,8 +3,9 @@
 로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM) 위에서 동작하는 에이전트 하네스.
 설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md) 참조.
 
-**현재 상태: Phase 1** — 에이전트 루프 + 파일 도구 5종(Read/Write/Edit/Glob/Grep) + 권한 게이트 + 루프 가드.
-Bash 도구와 텍스트 프로토콜 폴백(네이티브 tool call 미지원 모델용)은 Phase 2에서 추가된다.
+**현재 상태: Phase 2** — 에이전트 루프 + 도구 6종(Read/Write/Edit/Glob/Grep/Bash) + 권한 게이트(명령 위험 분류) +
+루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 + 텍스트 프로토콜 폴백 + 세션 저장/복원.
+컨텍스트 압축(장기 세션)은 Phase 3에서 추가된다.
 
 ## 요구사항
 
@@ -28,18 +29,44 @@ REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/clear` `/exit`
 
 ## 도구와 권한 모드
 
-네이티브 tool call을 지원하는 모델(프로파일 기준)에는 Read / Write / Edit / Glob / Grep
-도구가 제공된다. 프롬프트로 가르치는 규칙은 코드로도 강제된다: Edit/Write는 선행 Read 필수,
-읽은 뒤 파일이 외부에서 바뀌면 재읽기를 요구하고, 동일 호출 반복은 루프 가드가 차단한다
-(3회 반복 시 턴 강제 종료).
+도구는 Read / Write / Edit / Glob / Grep / Bash 6종. 프롬프트로 가르치는 규칙은 코드로도
+강제된다: Edit/Write는 선행 Read 필수, 읽은 뒤 파일이 외부에서 바뀌면 재읽기를 요구하고,
+동일 호출 반복(실패·거부된 호출의 재시도 포함)은 루프 가드가 차단한다(3회 반복 시 턴 강제 종료).
+Edit는 소형 모델의 대표 실수(라인 번호 프리픽스 포함, 들여쓰기 불일치)를 복구 사다리로 살려낸다.
+
+Bash 명령은 실행 전 위험도로 분류된다: `read`(ls, cat, git status...) / `mutate`(빌드, 테스트,
+git add...) / `destructive`(rm, git push, sudo, --no-verify...). 분류 불가능한 명령은 보수적으로
+mutate 취급.
 
 `--permission-mode` (`-M`, 기본 `ask`):
 
 | 모드 | 동작 |
 |---|---|
-| `readonly` | 변이 도구(Write/Edit)를 모델에게 아예 제공하지 않음 |
-| `ask` | 변이 호출마다 y/N 확인 (비대화형 실행에서는 거부됨) |
-| `auto` | 작업 디렉터리 안의 변이는 자동 허용, 밖은 확인 요청 |
+| `readonly` | 변이 도구(Write/Edit/Bash)를 모델에게 아예 제공하지 않음 |
+| `ask` | 변이 호출마다 y/N 확인. read 분류 Bash 명령은 자동 허용 |
+| `auto` | 작업 디렉터리 안의 변이는 자동 허용. **destructive는 항상 확인** |
+
+## 텍스트 프로토콜 폴백
+
+네이티브 tool call이 없는 모델(프로파일 기준, 또는 `--protocol text` 강제)은 시스템 프롬프트에
+문서화된 `<tool_call>{"name": ..., "arguments": ...}</tool_call>` 블록으로 도구를 쓴다.
+파서는 관대하다(코드펜스, parameters 별칭, 닫는 태그 누락, 태그 없는 bare JSON까지 복구).
+파싱 불가 시 포맷 리마인더를 보내 재시도시키고, 3회 실패하면 턴을 중단한다.
+Phase 1에서 네이티브 도구 호출에 실패했던 llama3.2(3B)가 이 프로토콜로는 버그 수정 시나리오를
+완주한다.
+
+## 컨텍스트 주입
+
+대화 시작 시 날짜·git 스냅샷(2000자 잘림)·프로젝트 메모리(AGENTS.md 또는 CLAUDE.md)가
+`<system-reminder>`로 첫 메시지에 주입된다("관련 없을 수 있음" 프레이밍 포함). 리마인더는
+항상 대화 꼬리에만 붙어 프리픽스 캐시를 깨지 않는다.
+
+## 세션 저장/복원
+
+대화는 `.harness/sessions/<id>.jsonl`에 턴 단위로 증분 저장된다(끄기: `--no-save` 또는
+config `saveSessions: false`). 복원은 `--resume last` 또는 `--resume <id>`. 복원 시
+파일이 바뀌었을 수 있다는 리마인더가 주입되어 모델이 편집 전 재읽기를 하도록 유도한다.
+현재 세션 파일 경로는 REPL에서 `/session`으로 확인.
 
 ## 턴별 통계와 캐시 계측
 

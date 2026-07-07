@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { DEFAULT_SYSTEM_PROMPT, effectiveContextLength, loadConfig } from '../config/config.js';
-import { resolveProfile } from '../models/profile.js';
+import { ReminderQueue } from '../context/reminders.js';
+import { startupContext } from '../context/startup.js';
+import { effectiveContextLength, loadConfig } from '../config/config.js';
+import { resolveProfile, type PromptTier } from '../models/profile.js';
 import { PermissionGate, PERMISSION_MODES, type PermissionMode } from '../permissions/gate.js';
-import { agentSystemPrompt } from '../prompts/agent.js';
+import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
 import { createProvider } from '../providers/index.js';
+import type { ChatMessage } from '../providers/types.js';
+import { loadSession, newSessionId, SessionStore } from '../session/store.js';
 import { defaultRegistry } from '../tools/registry.js';
 import { friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
 
@@ -22,8 +26,15 @@ Options:
   -p, --prompt <text>          one-shot prompt
   -M, --permission-mode <m>    readonly | ask | auto (default: ask)
                                readonly: mutating tools are not offered to the model
-                               ask: each file mutation asks y/N (interactive only)
-                               auto: mutations inside the working directory run without asking
+                               ask: mutations ask y/N (Bash read-only commands run freely)
+                               auto: mutations in the working dir run without asking;
+                               destructive commands always ask
+      --protocol <p>           native | text | none — force the tool protocol
+                               (default: native if the model profile supports it, else text)
+      --tier <t>               minimal | standard | full — system prompt tier
+                               (default: from the model profile)
+      --resume <id|last>       resume a saved session from .harness/sessions/
+      --no-save                do not persist this session
       --base-url <url>         override the provider's base URL
       --ctx <n>                context length (overrides the profile/config cap)
       --system <text>          override the system prompt
@@ -40,6 +51,10 @@ async function main(): Promise<void> {
       model: { type: 'string', short: 'm' },
       prompt: { type: 'string', short: 'p' },
       'permission-mode': { type: 'string', short: 'M' },
+      protocol: { type: 'string' },
+      tier: { type: 'string' },
+      resume: { type: 'string' },
+      'no-save': { type: 'boolean' },
       'base-url': { type: 'string' },
       ctx: { type: 'string' },
       system: { type: 'string' },
@@ -58,7 +73,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = loadConfig();
+  const cwd = process.cwd();
+  const config = loadConfig(cwd);
   const providerName = values.provider ?? config.defaultProvider;
   const providerCfg = config.providers[providerName];
   if (!providerCfg) {
@@ -72,7 +88,9 @@ async function main(): Promise<void> {
     die(`invalid --permission-mode "${mode}" — use one of: ${PERMISSION_MODES.join(', ')}`);
   }
 
-  let model = values.model ?? config.defaultModel;
+  const resumed = values.resume !== undefined ? tryLoad(cwd, values.resume) : undefined;
+
+  let model = values.model ?? resumed?.meta.model ?? config.defaultModel;
   if (!model) {
     let models: string[];
     try {
@@ -89,6 +107,23 @@ async function main(): Promise<void> {
   }
 
   const profile = resolveProfile(model, config.models);
+
+  let tier = profile.promptTier;
+  if (values.tier !== undefined) {
+    if (!['minimal', 'standard', 'full'].includes(values.tier)) {
+      die(`invalid --tier "${values.tier}" — use minimal | standard | full`);
+    }
+    tier = values.tier as PromptTier;
+  }
+
+  let protocol: ToolProtocol = profile.nativeToolCalls ? 'native' : 'text';
+  if (values.protocol !== undefined) {
+    if (!['native', 'text', 'none'].includes(values.protocol)) {
+      die(`invalid --protocol "${values.protocol}" — use native | text | none`);
+    }
+    protocol = values.protocol as ToolProtocol;
+  }
+
   let contextLength = effectiveContextLength(profile, config);
   if (values.ctx !== undefined) {
     const n = Number.parseInt(values.ctx, 10);
@@ -96,11 +131,44 @@ async function main(): Promise<void> {
     contextLength = n;
   }
 
-  const cwd = process.cwd();
-  const systemPrompt =
-    values.system ??
-    config.systemPrompt ??
-    (profile.nativeToolCalls ? agentSystemPrompt(cwd) : DEFAULT_SYSTEM_PROMPT);
+  const registry = defaultRegistry();
+  const reminders = new ReminderQueue();
+
+  let messages: ChatMessage[];
+  if (resumed) {
+    messages = resumed.messages;
+    if (messages[0]?.role !== 'system') {
+      messages.unshift({
+        role: 'system',
+        content: buildSystemPrompt({ tier, protocol, mode, registry, cwd }),
+      });
+    }
+    reminders.enqueue(
+      'This session was resumed from an earlier saved conversation. The filesystem may have changed since — Read files again before editing them.',
+    );
+  } else {
+    const systemPrompt =
+      values.system ?? config.systemPrompt ?? buildSystemPrompt({ tier, protocol, mode, registry, cwd });
+    messages = [{ role: 'system', content: systemPrompt }];
+    reminders.enqueue(startupContext(cwd));
+  }
+
+  const save = config.saveSessions && !values['no-save'];
+  let store: SessionStore | undefined;
+  if (save) {
+    if (resumed) {
+      store = new SessionStore(resumed.meta);
+      store.markSaved(resumed.messages.length);
+    } else {
+      store = new SessionStore({
+        id: newSessionId(),
+        createdAt: new Date().toISOString(),
+        provider: providerName,
+        model,
+        cwd,
+      });
+    }
+  }
 
   const session: CliSession = {
     provider,
@@ -110,12 +178,15 @@ async function main(): Promise<void> {
     config,
     contextLength,
     think: profile.thinking === 'none' ? undefined : !values['no-think'],
-    messages: [{ role: 'system', content: systemPrompt }],
-    registry: defaultRegistry(),
+    messages,
+    registry,
     // The REPL swaps in a gate wired to its readline for interactive approval.
     gate: new PermissionGate(mode, cwd, undefined),
     toolCtx: { cwd, readFiles: new Map() },
     maxSteps: config.maxSteps,
+    protocol,
+    reminders,
+    store,
   };
 
   if (values.prompt !== undefined) {
@@ -127,6 +198,14 @@ async function main(): Promise<void> {
     }
   } else {
     await runRepl(session);
+  }
+}
+
+function tryLoad(cwd: string, idOrLast: string): ReturnType<typeof loadSession> {
+  try {
+    return loadSession(cwd, idOrLast);
+  } catch (e) {
+    die((e as Error).message);
   }
 }
 
