@@ -5,7 +5,7 @@ import type { ModelProfile, ResolvedProfile } from '../models/profile.js';
 import type { PermissionMode } from '../permissions/gate.js';
 
 export interface ProviderConfig {
-  type: 'ollama' | 'llamacpp' | 'vllm' | 'openai-compat';
+  type: 'ollama' | 'llamacpp' | 'vllm' | 'mlx' | 'openai-compat';
   baseUrl: string;
   apiKey?: string;
   keepAlive?: string;
@@ -50,6 +50,8 @@ const DEFAULTS: HarnessConfig = {
     ollama: { type: 'ollama', baseUrl: 'http://localhost:11434' },
     llamacpp: { type: 'llamacpp', baseUrl: 'http://localhost:8080' },
     vllm: { type: 'vllm', baseUrl: 'http://localhost:8000' },
+    // Apple MLX (mlx_lm.server). 8081 avoids llama.cpp's default 8080.
+    mlx: { type: 'mlx', baseUrl: 'http://localhost:8081' },
   },
   contextLength: 32768,
   permissionMode: 'ask',
