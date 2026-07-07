@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_COMPACTION, type CompactionSettings } from '../src/context/budget.js';
 import { ReminderQueue } from '../src/context/reminders.js';
 import { runTurn, type AgentEvent, type AgentSession } from '../src/core/loop.js';
 import { resolveProfile } from '../src/models/profile.js';
@@ -69,6 +70,7 @@ function makeSession(
     maxSteps?: number;
     ask?: (s: string) => Promise<boolean>;
     protocol?: 'native' | 'text' | 'none';
+    compaction?: Partial<CompactionSettings>;
   } = {},
 ): AgentSession {
   const mode = opts.mode ?? 'auto';
@@ -85,6 +87,7 @@ function makeSession(
     maxSteps: opts.maxSteps ?? 20,
     protocol: opts.protocol ?? 'native',
     reminders: new ReminderQueue(),
+    compaction: { ...DEFAULT_COMPACTION, ...opts.compaction },
   };
 }
 
@@ -241,6 +244,24 @@ describe('runTurn', () => {
     expect(retryMsg?.content).toContain('Do not repeat the call');
   });
 
+  it('tells the model a repeated successful mutation is already applied', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'v1' });
+    const edit = () => toolStep(call('c', 'Edit', { file_path: 'a.ts', old_string: 'v1', new_string: 'v2' }));
+    const provider = new ScriptedProvider([
+      toolStep(call('r', 'Read', { file_path: 'a.ts' })),
+      edit(), // succeeds
+      edit(), // identical retry of a successful mutation
+      textStep('ok'),
+    ]);
+    const session = makeSession(provider, ctx);
+    await collectEvents(runTurn(session, 'edit it'));
+    const retryMsg = provider.received[3].messages.filter((m) => m.role === 'tool').at(-1);
+    expect(retryMsg?.content).toContain('already SUCCEEDED');
+    expect(retryMsg?.content).toContain('move on to the next step');
+    expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('v2');
+  });
+
   it('intercepts an identical retry of a failed call', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'hello' });
@@ -327,6 +348,63 @@ describe('runTurn', () => {
     expect(resultMsg.content).toContain('const x = 1;');
     // the assistant message keeps its own tool_call block verbatim
     expect(second.at(-2)?.content).toContain('<tool_call>');
+  });
+
+  it('clears old tool results mid-turn when the budget tightens (FRC)', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'big.txt': 'data '.repeat(500) }); // ~2500 chars of tool result
+    const provider = new ScriptedProvider([
+      toolStep(call('c1', 'Read', { file_path: 'big.txt' })),
+      textStep('done'),
+    ]);
+    const session = makeSession(provider, ctx, {
+      compaction: { keepRecentResults: 0, frcThreshold: 0.3, threshold: 10, reserveTokens: 0 },
+    });
+    session.contextLength = 2000;
+    const events = await collectEvents(runTurn(session, 'read the big file'));
+    const notice = events.find((e) => e.type === 'notice');
+    expect(notice?.message).toContain('cleared 1 old tool result');
+    const toolMsg = session.messages.find((m) => m.role === 'tool');
+    expect(toolMsg?.content).toContain('cleared to save context');
+  });
+
+  it('auto-compacts mid-turn past the threshold and continues the turn', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'big.txt': 'data '.repeat(500) });
+    const summary = [
+      '## 1. Task and intent\nread big file',
+      '## 2. Files and code\nbig.txt',
+      '## 3. What was tried\nRead',
+      '## 4. User feedback\nnone',
+      '## 5. Current state\nreading',
+      '## 6. Next step\n"read the big file"',
+    ].join('\n');
+    const provider = new ScriptedProvider([
+      toolStep(call('c1', 'Read', { file_path: 'big.txt' })),
+      [{ type: 'text', text: summary }, { type: 'done', stopReason: 'stop' }],
+      textStep('all done'),
+    ]);
+    const compacted: number[] = [];
+    const session = makeSession(provider, ctx, {
+      compaction: { keepRecentResults: 5, frcThreshold: 10, threshold: 0.5, reserveTokens: 0 },
+    });
+    session.contextLength = 600;
+    session.transcriptPath = '/tmp/t.jsonl';
+    session.onCompacted = (m) => compacted.push(m.length);
+
+    const events = await collectEvents(runTurn(session, 'read the big file'));
+
+    const notices = events.filter((e) => e.type === 'notice').map((e) => e.message);
+    expect(notices.some((m) => m.includes('compacted ~'))).toBe(true);
+    // the summarize request is the 2nd provider call: tool-free, compact prompt last
+    expect(provider.received[1].toolNames).toEqual([]);
+    expect(provider.received[1].messages.at(-1)?.content).toContain('CRITICAL: Respond with TEXT ONLY');
+    // post-compact request carries the summary instead of the old messages
+    const finalReq = provider.received[2].messages;
+    expect(finalReq.some((m) => m.content.includes('# Conversation summary'))).toBe(true);
+    expect(compacted).toHaveLength(1);
+    expect(session.toolCtx.readFiles.size).toBe(0); // forced re-reads after compaction
+    expect(events.filter((e) => e.type === 'text').map((e) => e.text).join('')).toBe('all done');
   });
 
   it('sends a format reminder on malformed text calls and aborts after three', async () => {

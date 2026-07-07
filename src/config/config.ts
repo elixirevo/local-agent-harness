@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { DEFAULT_COMPACTION, type CompactionSettings } from '../context/budget.js';
 import type { ModelProfile, ResolvedProfile } from '../models/profile.js';
 import type { PermissionMode } from '../permissions/gate.js';
 
@@ -23,6 +24,7 @@ export interface HarnessConfig {
   maxSteps: number;
   /** Persist conversations to .harness/sessions/*.jsonl (resume with --resume). */
   saveSessions: boolean;
+  compaction: CompactionSettings;
   /** Profile overrides keyed by exact model id or family name. */
   models?: Record<string, Partial<ModelProfile>>;
 }
@@ -46,6 +48,7 @@ const DEFAULTS: HarnessConfig = {
   permissionMode: 'ask',
   maxSteps: 20,
   saveSessions: true,
+  compaction: DEFAULT_COMPACTION,
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -64,6 +67,7 @@ export function loadConfig(cwd: string = process.cwd()): HarnessConfig {
     ...structuredClone(DEFAULTS),
     ...user,
     providers: { ...structuredClone(DEFAULTS.providers), ...(user.providers ?? {}) },
+    compaction: { ...DEFAULT_COMPACTION, ...(user.compaction ?? {}) },
   };
   if (!merged.providers[merged.defaultProvider]) {
     throw new Error(

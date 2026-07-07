@@ -1,3 +1,6 @@
+import { compactSession } from '../compact/compact.js';
+import { budgetStatus, type CompactionSettings } from '../context/budget.js';
+import { clearOldToolResults } from '../context/frc.js';
 import type { ReminderQueue } from '../context/reminders.js';
 import { systemReminder } from '../context/reminders.js';
 import type { ResolvedProfile } from '../models/profile.js';
@@ -30,6 +33,11 @@ export interface AgentSession {
   /** How tools reach the model: native tool-calls, the text protocol, or not at all. */
   protocol: ToolProtocol;
   reminders: ReminderQueue;
+  compaction: CompactionSettings;
+  /** Shown to the model after compaction as the full-history escape hatch. */
+  transcriptPath?: string;
+  /** Called after auto-compaction so the caller can persist the rebuilt history. */
+  onCompacted?: (messages: ChatMessage[]) => void;
 }
 
 export type AgentEvent =
@@ -37,7 +45,7 @@ export type AgentEvent =
   | { type: 'thinking'; text: string }
   | { type: 'tool_start'; name: string; summary: string }
   | { type: 'tool_end'; name: string; ok: boolean; summary: string }
-  | { type: 'step'; usage?: Usage; wallMs: number; stopReason: StopReason }
+  | { type: 'step'; usage?: Usage; wallMs: number; stopReason: StopReason; contextPct?: number }
   | { type: 'notice'; message: string }
   | { type: 'guard'; message: string };
 
@@ -59,6 +67,7 @@ export async function* runTurn(
 
   const guard = new RepeatGuard();
   let malformedCount = 0;
+  let compactedThisTurn = false; // at most one auto-compaction per turn (anti-thrash)
   const toolDefs =
     session.protocol === 'native'
       ? session.registry.toolDefs(session.gate.mode, session.profile.promptTier)
@@ -72,6 +81,11 @@ export async function* runTurn(
       };
       return;
     }
+
+    const maintained = await maintainContext(session, toolDefs, !compactedThisTurn, signal);
+    for (const notice of maintained.notices) yield { type: 'notice', message: notice };
+    if (maintained.compacted) compactedThisTurn = true;
+    const contextPct = maintained.pct;
 
     const started = Date.now();
     let content = '';
@@ -108,7 +122,7 @@ export async function* runTurn(
           break;
       }
     }
-    yield { type: 'step', usage, wallMs: Date.now() - started, stopReason };
+    yield { type: 'step', usage, wallMs: Date.now() - started, stopReason, contextPct };
 
     // Resolve tool calls for this step: native chunks, or a text-protocol block.
     let calls = nativeCalls;
@@ -182,6 +196,78 @@ export async function* runTurn(
   }
 }
 
+interface MaintainResult {
+  notices: string[];
+  pct: number;
+  compacted: boolean;
+}
+
+/**
+ * Staged context reclamation before a model step: clear old tool results at
+ * the lower threshold, compact at the higher one. Both replace
+ * session.messages with new arrays (old objects untouched) so the caller's
+ * turn-rollback snapshot stays valid.
+ */
+async function maintainContext(
+  session: AgentSession,
+  toolDefs: ReturnType<ToolRegistry['toolDefs']>,
+  allowCompaction: boolean,
+  signal?: AbortSignal,
+): Promise<MaintainResult> {
+  const settings = session.compaction;
+  const pct = (u: number) => Math.round(u * 100);
+  const notices: string[] = [];
+  let compacted = false;
+  let status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
+  if (!settings.enabled) return { notices, pct: pct(status.usage), compacted };
+
+  if (status.usage > settings.frcThreshold) {
+    let frc = clearOldToolResults(session.messages, settings.keepRecentResults);
+    if (frc.cleared > 0) session.messages = frc.messages;
+    let cleared = frc.cleared;
+    status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
+    // Escalate before resorting to compaction: keep only the newest result.
+    if (status.usage > settings.threshold && settings.keepRecentResults > 1) {
+      frc = clearOldToolResults(session.messages, 1);
+      if (frc.cleared > 0) {
+        session.messages = frc.messages;
+        cleared += frc.cleared;
+        status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
+      }
+    }
+    if (cleared > 0) {
+      notices.push(
+        `context ~${pct(status.usage)}% — cleared ${cleared} old tool result${cleared > 1 ? 's' : ''}`,
+      );
+    }
+  }
+
+  if (allowCompaction && status.usage > settings.threshold) {
+    const preUsage = pct(status.usage);
+    const result = await compactSession(session.messages, {
+      provider: session.provider,
+      model: session.model,
+      contextLength: session.contextLength,
+      thinking: session.profile.thinking,
+      think: session.think,
+      transcriptPath: session.transcriptPath,
+      signal,
+    });
+    if (result.messages !== session.messages) {
+      compacted = true;
+      session.messages = result.messages;
+      // Pre-compaction file contents are gone from context; force re-reads.
+      session.toolCtx.readFiles.clear();
+      session.onCompacted?.(result.messages);
+      status = budgetStatus(session.messages, session.contextLength, settings, toolDefs);
+      notices.push(
+        `context ~${preUsage}% — compacted ~${result.beforeTokens} → ~${result.afterTokens} tok${result.degraded ? ' (summary failed validation — continuing with best effort)' : ''}${status.usage > 1 ? ' — still over budget; consider /clear' : ''}`,
+      );
+    }
+  }
+  return { notices, pct: pct(status.usage), compacted };
+}
+
 interface CallOutcome {
   ok: boolean;
   output: string;
@@ -209,10 +295,12 @@ async function executeCall(
   // Repeat check first — before the gate — so a user who denied a call once
   // is not asked again about the model's identical retry.
   const key = guard.keyFor(call, input);
-  const verdict = guard.checkRepeat(key);
+  const { verdict, succeededBefore } = guard.checkRepeat(key);
   if (verdict !== 'run') {
     return fail(
-      `you already ran ${call.name} with exactly these arguments in this turn and nothing has changed since — the outcome would be identical. Do not repeat the call: use the earlier result, try a different approach, or ask the user.`,
+      succeededBefore
+        ? `${call.name} with these exact arguments already SUCCEEDED earlier in this turn — the change is applied. Do not run it again; move on to the next step (e.g. verify the result or report you are done).`
+        : `you already ran ${call.name} with exactly these arguments in this turn and nothing has changed since — the outcome would be identical. Do not repeat the call: use the earlier result, try a different approach, or ask the user.`,
       tool && input ? tool.summarize(input, session.toolCtx) : call.name,
       verdict === 'abort',
     );
@@ -306,7 +394,8 @@ function firstLine(s: string): string {
  * executed mutation resets the notion of "identical" (state actually moved).
  */
 class RepeatGuard {
-  private seen = new Set<string>();
+  /** key → whether that call was a successfully executed mutation. */
+  private seen = new Map<string, boolean>();
   private intercepts = 0;
 
   keyFor(call: ToolCall, input: Record<string, unknown> | undefined): string {
@@ -317,17 +406,20 @@ class RepeatGuard {
       : `${call.name}:${stableStringify(input)}`;
   }
 
-  checkRepeat(key: string): 'run' | 'intercept' | 'abort' {
+  checkRepeat(key: string): { verdict: 'run' | 'intercept' | 'abort'; succeededBefore: boolean } {
     if (this.seen.has(key)) {
       this.intercepts++;
-      return this.intercepts >= 3 ? 'abort' : 'intercept';
+      return {
+        verdict: this.intercepts >= 3 ? 'abort' : 'intercept',
+        succeededBefore: this.seen.get(key) === true,
+      };
     }
-    return 'run';
+    return { verdict: 'run', succeededBefore: false };
   }
 
   record(key: string, stateChanged: boolean): void {
     if (stateChanged) this.seen.clear();
-    this.seen.add(key);
+    this.seen.set(key, stateChanged);
   }
 }
 

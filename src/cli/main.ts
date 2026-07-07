@@ -187,6 +187,9 @@ async function main(): Promise<void> {
     protocol,
     reminders,
     store,
+    compaction: config.compaction,
+    transcriptPath: store?.file,
+    onCompacted: (compacted) => store?.recordCompaction(compacted),
   };
 
   if (values.prompt !== undefined) {

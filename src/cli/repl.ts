@@ -1,4 +1,6 @@
 import * as readline from 'node:readline/promises';
+import { compactSession } from '../compact/compact.js';
+import { budgetStatus } from '../context/budget.js';
 import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import { effectiveContextLength, type HarnessConfig } from '../config/config.js';
 import { resolveProfile } from '../models/profile.js';
@@ -95,13 +97,17 @@ function renderEvent(ev: AgentEvent, st: RenderState): void {
     case 'tool_end':
       write(dim(`  ${ev.ok ? '✓' : '✗'} ${ev.summary}`) + '\n');
       break;
-    case 'step':
+    case 'step': {
       ensureNewline(st);
-      if (ev.usage) write(dim(formatUsage(ev.usage, ev.wallMs)) + '\n');
+      if (ev.usage) {
+        const ctx = ev.contextPct !== undefined ? ` · ctx ~${ev.contextPct}%` : '';
+        write(dim(formatUsage(ev.usage, ev.wallMs).replace(/]$/, `${ctx}]`)) + '\n');
+      }
       // a new model step starts fresh for thinking/text separation
       st.sawThinking = false;
       st.startedText = false;
       break;
+    }
     case 'notice':
       ensureNewline(st);
       write(dim(`[note] ${ev.message}`) + '\n');
@@ -119,14 +125,16 @@ function renderEvent(ev: AgentEvent, st: RenderState): void {
  * never contains an assistant message with dangling tool calls.
  */
 async function chatTurn(session: CliSession, input: string, signal?: AbortSignal): Promise<void> {
-  const snapshot = session.messages.length;
+  // Array snapshot, not a length: FRC/compaction may replace the array
+  // mid-turn (they never mutate the old message objects).
+  const snapshot = session.messages.slice();
   const st = newRenderState();
   try {
     for await (const ev of runTurn(session, input, signal)) renderEvent(ev, st);
     ensureNewline(st);
     session.store?.append(session.messages);
   } catch (err) {
-    session.messages.length = snapshot;
+    session.messages = snapshot;
     ensureNewline(st);
     if (isAbortError(err)) {
       console.log(dim('[interrupted — turn discarded]'));
@@ -280,6 +288,8 @@ const HELP = `commands:
   /model <id>         switch model (re-resolves its profile)
   /provider <name>    switch provider (configured in harness.config.json)
   /session            show where this conversation is being saved
+  /context            show the context budget estimate
+  /compact            summarize the conversation now to free context
   /clear              reset conversation (keeps system prompt)
   /exit               quit`;
 
@@ -297,6 +307,41 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
     case '/session':
       console.log(session.store ? session.store.file : dim('(session saving is disabled)'));
       return false;
+    case '/context': {
+      const defs =
+        session.protocol === 'native'
+          ? session.registry.toolDefs(session.gate.mode, session.profile.promptTier)
+          : [];
+      const s = budgetStatus(session.messages, session.contextLength, session.compaction, defs);
+      console.log(
+        `~${s.estimatedTokens} of ${s.usableTokens} usable tokens (${Math.round(s.usage * 100)}%) · ` +
+          `${session.messages.length} messages · window ${session.contextLength} (reserve ${session.compaction.reserveTokens})`,
+      );
+      return false;
+    }
+    case '/compact': {
+      try {
+        const result = await compactSession(session.messages, {
+          provider: session.provider,
+          model: session.model,
+          contextLength: session.contextLength,
+          thinking: session.profile.thinking,
+          think: session.think,
+          transcriptPath: session.store?.file,
+        });
+        session.messages = result.messages;
+        session.toolCtx.readFiles.clear();
+        session.store?.recordCompaction(result.messages);
+        console.log(
+          dim(
+            `compacted ~${result.beforeTokens} → ~${result.afterTokens} tok${result.degraded ? ' (summary failed validation)' : ''}`,
+          ),
+        );
+      } catch (err) {
+        printError(session, err);
+      }
+      return false;
+    }
     case '/clear':
       session.messages = session.messages.slice(0, 1);
       session.toolCtx.readFiles.clear();
