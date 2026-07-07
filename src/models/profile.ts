@@ -124,8 +124,9 @@ const PROFILES: Array<{ match: RegExp; profile: ModelProfile }> = [
       parallelToolCalls: false,
       thinking: 'field',
       promptTier: 'standard',
-      temperature: 1.0,
-      notes: 'Verified via `ollama show` (0.30.x): tools + thinking capabilities. Gemma-family default temperature 1.0.',
+      temperature: 0.4,
+      notes:
+        'Tools + thinking verified via `ollama show` (0.30.x). Temperature 0.4 set from eval evidence (2026-07-07, n=44 agentic runs): 86% vs 80% success against the chat-recommended 1.0, zero guard trips, ~20% faster — 1.0 showed false completion claims and inverted fixes under context pressure.',
     },
   },
   {
