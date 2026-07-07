@@ -1,0 +1,26 @@
+{
+  "name": "agent-harness",
+  "version": "0.1.0",
+  "description": "Local LLM agent harness for Ollama / llama.cpp / vLLM",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "harness": "dist/cli/main.js"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "start": "tsx src/cli/main.ts",
+    "dev": "tsx src/cli/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
