@@ -50,6 +50,7 @@ function coreRules(opts: PromptBuildOptions): string {
     '- Never guess or invent file contents — read a file before you describe or change it.',
     '- Prefer Edit for changing existing files; use Write only for new files or full rewrites.',
     '- If a tool call fails, read the error message and fix the call — never repeat it unchanged.',
+    '- Old tool results may be cleared from the context to save space; record important findings in your replies.',
     '- When the task is done, stop calling tools and reply with a short summary of what you did.',
   ];
   return `# Rules\n${rules.join('\n')}`;
