@@ -20,6 +20,11 @@ interface MessageLine {
   message: ChatMessage;
 }
 
+/** Marks a compaction: messages after this line replace everything above it. */
+interface CompactLine {
+  type: 'compact';
+}
+
 export const SESSIONS_DIR = '.harness/sessions';
 
 /**
@@ -62,6 +67,29 @@ export class SessionStore {
     this.savedCount = count;
     this.metaWritten = true;
   }
+
+  /**
+   * Persist a compaction: a marker line followed by the rebuilt history.
+   * The pre-compaction lines stay in the file (they are the full-transcript
+   * escape hatch the model is pointed at); loading replays past the marker.
+   */
+  recordCompaction(messages: ChatMessage[]): void {
+    const lines: string[] = [];
+    if (!this.metaWritten) {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      const metaLine: MetaLine = { type: 'meta', version: 1, ...this.meta };
+      lines.push(JSON.stringify(metaLine));
+      this.metaWritten = true;
+    }
+    const marker: CompactLine = { type: 'compact' };
+    lines.push(JSON.stringify(marker));
+    for (const message of messages) {
+      const line: MessageLine = { type: 'message', message };
+      lines.push(JSON.stringify(line));
+    }
+    fs.appendFileSync(this.file, `${lines.join('\n')}\n`, 'utf8');
+    this.savedCount = messages.length;
+  }
 }
 
 export function newSessionId(now: Date = new Date()): string {
@@ -84,15 +112,16 @@ export function loadSession(cwd: string, idOrLast: string): { meta: SessionMeta;
 
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
   let meta: SessionMeta | undefined;
-  const messages: ChatMessage[] = [];
+  let messages: ChatMessage[] = [];
   for (const line of lines) {
-    let parsed: MetaLine | MessageLine;
+    let parsed: MetaLine | MessageLine | CompactLine;
     try {
       parsed = JSON.parse(line);
     } catch {
       continue; // tolerate a torn trailing line from a crashed process
     }
     if (parsed.type === 'meta') meta = parsed;
+    else if (parsed.type === 'compact') messages = [];
     else if (parsed.type === 'message') messages.push(parsed.message);
   }
   if (!meta) throw new Error(`session file has no meta line: ${file}`);

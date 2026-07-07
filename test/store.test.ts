@@ -54,4 +54,29 @@ describe('SessionStore', () => {
     expect(() => loadSession(dir, 'last')).toThrow(/no saved sessions/);
     expect(() => loadSession(dir, 'nope')).toThrow(/session not found/);
   });
+
+  it('records compaction: load returns rebuilt state, file keeps full history', () => {
+    const { dir } = tmpCtx();
+    const meta = { id: newSessionId(), createdAt: 'now', provider: 'p', model: 'm', cwd: dir };
+    const store = new SessionStore(meta);
+    store.append(msgs(6));
+    const rebuilt: ChatMessage[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'summary + continuation' },
+    ];
+    store.recordCompaction(rebuilt);
+
+    const loaded = loadSession(dir, meta.id);
+    expect(loaded.messages).toHaveLength(2);
+    expect(loaded.messages[1].content).toBe('summary + continuation');
+
+    // pre-compaction lines remain as the full-transcript escape hatch
+    const raw = fs.readFileSync(path.join(dir, '.harness/sessions', `${meta.id}.jsonl`), 'utf8');
+    expect(raw).toContain('m5');
+    expect(raw).toContain('"type":"compact"');
+
+    // post-compaction turns keep appending normally
+    store.append([...rebuilt, { role: 'assistant', content: 'next answer' }]);
+    expect(loadSession(dir, meta.id).messages).toHaveLength(3);
+  });
 });
