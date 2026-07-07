@@ -5,6 +5,7 @@ import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import { effectiveContextLength, type HarnessConfig } from '../config/config.js';
 import type { McpConnection } from '../mcp/index.js';
 import { resolveProfile } from '../models/profile.js';
+import { rememberNote } from '../session/memory.js';
 import { PermissionGate, type AskFn, type PermissionMode } from '../permissions/gate.js';
 import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
@@ -304,6 +305,7 @@ const HELP = `commands:
   /provider <name>    switch provider (configured in harness.config.json)
   /plan               toggle plan mode (read-only + a single plan file)
   /mcp                list connected MCP servers and their tools
+  /remember <note>    append a note to AGENTS.md (picked up next session)
   /session            show where this conversation is being saved
   /context            show the context budget estimate
   /compact            summarize the conversation now to free context
@@ -346,6 +348,19 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
           console.log(
             `${c.client.name} (${c.client.serverInfo?.name ?? '?'}): ${c.toolNames.length ? c.toolNames.join(', ') : dim('(no tools)')}`,
           );
+      }
+      return false;
+    }
+    case '/remember': {
+      if (!arg) {
+        console.log(dim('usage: /remember <note to save to AGENTS.md>'));
+        return false;
+      }
+      try {
+        const { file, created } = rememberNote(session.toolCtx.cwd, arg);
+        console.log(dim(`${created ? 'created' : 'updated'} ${file}`));
+      } catch (err) {
+        printError(session, err);
       }
       return false;
     }
