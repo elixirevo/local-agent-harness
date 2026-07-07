@@ -149,6 +149,25 @@ describe('Edit', () => {
     expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toContain('a + b');
   });
 
+  it('strips line-number prefixes from new_string too when recovery kicks in', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'function add(a, b) {\n  return a - b;\n}\n' });
+    await readFirst(dir, ctx);
+    const res = await editTool.call(
+      {
+        file_path: 'a.ts',
+        old_string: '     2\t  return a - b;',
+        new_string: '     2\t  return a + b;', // model copies prefixes into both
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(res.output).toContain('also removed from new_string');
+    const content = fs.readFileSync(path.join(dir, 'a.ts'), 'utf8');
+    expect(content).toBe('function add(a, b) {\n  return a + b;\n}\n');
+    expect(content).not.toMatch(/\d\t/);
+  });
+
   it('recovers a whitespace-mismatched old_string when the match is unique', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'if (x) {\n\treturn a - b;\n}\n' }); // tab-indented file

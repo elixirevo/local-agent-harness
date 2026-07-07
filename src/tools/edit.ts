@@ -43,7 +43,7 @@ export const editTool: Tool = {
   async call(input, ctx): Promise<ToolResult> {
     const abs = resolvePath(input.file_path as string, ctx);
     const oldString = input.old_string as string;
-    const newString = input.new_string as string;
+    let newString = input.new_string as string;
     const replaceAll = input.replace_all === true;
 
     if (oldString === newString) return err('old_string and new_string are identical — nothing to change.');
@@ -64,6 +64,12 @@ export const editTool: Tool = {
 
     const text = fs.readFileSync(abs, 'utf8');
     const match = findTarget(text, oldString);
+    // A model copying line-number prefixes into old_string does it in
+    // new_string too — writing that verbatim would corrupt the file.
+    if (match.kind === 'found' && match.note && looksLinePrefixed(newString)) {
+      newString = stripLinePrefixes(newString);
+      match.note += '; line-number prefixes were also removed from new_string';
+    }
     if (match.kind === 'none') {
       return err(
         'old_string was not found in the file. It must match exactly, including whitespace and indentation, without the line-number prefixes from Read. Read the file again to get the current content.',
@@ -100,6 +106,14 @@ type TargetMatch =
   | { kind: 'none' }
   | { kind: 'ambiguous' };
 
+const LINE_PREFIX_RE = /^\s{0,6}\d+(\t| {2,})/;
+
+/** True when every non-empty line carries a Read-style line-number prefix. */
+function looksLinePrefixed(s: string): boolean {
+  const lines = s.split('\n').filter((l) => l.trim() !== '');
+  return lines.length > 0 && lines.every((l) => LINE_PREFIX_RE.test(l));
+}
+
 /**
  * Recovery ladder for the dominant small-model failure ("old_string not
  * found"): 1) exact match, 2) exact match after stripping the line-number
@@ -134,7 +148,7 @@ function findTarget(text: string, oldString: string): TargetMatch {
 function stripLinePrefixes(s: string): string {
   return s
     .split('\n')
-    .map((l) => l.replace(/^\s{0,6}\d+(\t| {2,})/, ''))
+    .map((l) => l.replace(LINE_PREFIX_RE, ''))
     .join('\n');
 }
 
