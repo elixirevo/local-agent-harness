@@ -1,7 +1,8 @@
 # agent-harness
 
 로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM / Apple MLX) 위에서 동작하는 에이전트 하네스.
-설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md) 참조.
+설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md),
+다음 단계는 [docs/maturity-roadmap.md](docs/maturity-roadmap.md) 참조.
 
 **현재 상태: Phase 6** — 에이전트 루프 + 도구 7종+MCP(Read/Write/Edit/Glob/Grep/Bash/Agent + `mcp__*`) +
 권한 게이트(명령 위험 분류) + 루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 +
