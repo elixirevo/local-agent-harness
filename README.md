@@ -1,13 +1,14 @@
 # agent-harness
 
-로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM) 위에서 동작하는 에이전트 하네스.
+로컬 LLM 프로바이더(Ollama / llama.cpp / vLLM / Apple MLX) 위에서 동작하는 에이전트 하네스.
 설계 배경과 로드맵은 [docs/local-agent-harness-plan.md](docs/local-agent-harness-plan.md) 참조.
 
-**현재 상태: Phase 5** — 에이전트 루프 + 도구 7종+MCP(Read/Write/Edit/Glob/Grep/Bash/Agent + `mcp__*`) +
+**현재 상태: Phase 6** — 에이전트 루프 + 도구 7종+MCP(Read/Write/Edit/Glob/Grep/Bash/Agent + `mcp__*`) +
 권한 게이트(명령 위험 분류) + 루프 가드 + 프롬프트 티어 + system-reminder 컨텍스트 주입 +
 텍스트 프로토콜 폴백 + 세션 저장/복원 + 컨텍스트 수명 관리(캘리브레이션된 토큰 예산, FRC, 자동 압축,
-grammar 강제 재시도) + 서브에이전트(Explore/Verify) + **계획 모드** + **MCP 클라이언트** +
-평가 하네스(`harness eval`).
+grammar 강제 재시도) + 서브에이전트(Explore/Verify, **read-only 배치 병렬 실행**) + 계획 모드 +
+MCP 클라이언트 + 평가 하네스(`harness eval`) + **Apple MLX 프로바이더** + `/remember` 세션 메모리 +
+작업 중 스피너.
 
 ## 요구사항
 
@@ -16,6 +17,7 @@ grammar 강제 재시도) + 서브에이전트(Explore/Verify) + **계획 모드
   - Ollama (`ollama serve`, 기본 http://localhost:11434)
   - llama.cpp (`llama-server --jinja -m <model.gguf>`, 기본 http://localhost:8080)
   - vLLM (`vllm serve <model>`, 기본 http://localhost:8000)
+  - Apple MLX (`mlx_lm.server --model <mlx-model> --port 8081`, Apple Silicon 전용)
 
 ## 시작하기
 
@@ -27,7 +29,23 @@ npm start -- -p "src의 버그 고쳐줘" -M auto    # one-shot 에이전트 실
 npm start -- -P llamacpp                     # 프로바이더 지정
 ```
 
-REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/clear` `/exit`
+REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/plan` `/mcp` `/remember <note>`
+`/context` `/compact` `/session` `/clear` `/exit`
+
+### Apple MLX (Apple Silicon)
+
+vLLM은 CUDA 전용이라 Mac에서 못 쓰지만, Apple의 MLX(`mlx-lm`)는 Apple Silicon 네이티브다 —
+Ollama에 이어 **Mac에서 라이브 검증 가능한 두 번째 프로바이더**:
+
+```bash
+pip install mlx-lm                                              # transformers 4.48로 핀 필요할 수 있음
+mlx_lm.server --model mlx-community/Qwen3-4B-4bit --port 8081
+npm start -- -P mlx -m mlx-community/Qwen3-4B-4bit -M auto      # 하네스 연결
+```
+
+실측 검증(Qwen3-4B-4bit): 스트리밍·네이티브 도구 호출·전체 에이전트 루프(Read→Edit) 정상,
+그리고 Ollama와 달리 `cached_tokens`를 실제로 보고(2턴째 cached 2364/2389 — prefix cache 신호).
+guided decoding은 없어 압축 재시도는 일반 재요청으로 폴백.
 
 ## 도구와 권한 모드
 
@@ -99,6 +117,18 @@ config에 stdio MCP 서버를 등록하면 그 도구들이 `mcp__서버명__도
   `VERDICT: PASS|FAIL|PARTIAL` 라인으로 끝나며 호출자가 파싱한다.
 
 서브에이전트는 다시 에이전트를 만들 수 없다(재귀 차단). 결과는 라벨 계약(`Scope:/Result:/Key files:`)으로 회수된다.
+
+**병렬 실행**: 한 스텝에서 모델이 여러 read 분류 호출(Read/Grep/Glob 팬아웃, explore 서브에이전트)을
+내면 동시 실행된다(mutation이 하나라도 섞이면 순차 유지 — 순서와 가드 상태가 중요하므로). 결과는
+호출 순서대로 회수된다. 서브에이전트를 실제로 병렬 실행하려면 Ollama는 `OLLAMA_NUM_PARALLEL=2+`가
+필요하다(로컬 파일 읽기는 무관하게 병렬).
+
+## /remember — 세션 메모리
+
+`/remember <note>`는 프로젝트 AGENTS.md의 관리 섹션(`## Harness notes`)에 날짜 붙은 노트를
+append한다(사용자 기존 내용은 건드리지 않음). 다음 세션의 시작 컨텍스트가 자동 회수하고, 노화
+프레이밍으로 오래된 노트를 실시간 상태로 오인하지 않게 한다. 자동 추출은 의도적으로 제외 —
+사용자 프로젝트 파일 쓰기는 명시적 명령 뒤에만.
 
 ## 평가 하네스 (harness eval)
 
