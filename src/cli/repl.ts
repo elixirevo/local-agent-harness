@@ -27,6 +27,8 @@ export interface CliSession extends AgentSession {
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const dim = (s: string) => (useColor ? `\x1b[2m${s}\x1b[0m` : s);
 const bold = (s: string) => (useColor ? `\x1b[1m${s}\x1b[0m` : s);
+const green = (s: string) => (useColor ? `\x1b[32m${s}\x1b[0m` : s);
+const red = (s: string) => (useColor ? `\x1b[31m${s}\x1b[0m` : s);
 const PROMPT = useColor ? '\x1b[36m❯\x1b[0m ' : '> ';
 
 export function friendlyFetchError(providerName: string, baseUrl: string, err: unknown): string {
@@ -72,6 +74,53 @@ function newRenderState(): RenderState {
 
 const write = (s: string) => process.stdout.write(s);
 
+/**
+ * A transient "working…" line for the silent gaps — tool execution, prompt
+ * prefill, compaction. Armed before every awaited event but only actually
+ * drawn after a short delay, so a fast stream of tokens (each its own event)
+ * never triggers it and it appears only when the harness is genuinely waiting.
+ */
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_DELAY_MS = 150;
+
+class Spinner {
+  private armTimer: NodeJS.Timeout | undefined;
+  private tick: NodeJS.Timeout | undefined;
+  private drawn = false;
+  private frame = 0;
+  private startedAt = 0;
+  private readonly enabled = Boolean(process.stdout.isTTY) && useColor;
+
+  /** Arm the spinner; it draws only if `canDraw` and the delay elapses first. */
+  arm(canDraw: boolean): void {
+    if (!this.enabled || !canDraw) return;
+    this.startedAt = Date.now();
+    this.armTimer = setTimeout(() => {
+      this.drawn = true;
+      this.tick = setInterval(() => this.render(), 90);
+      this.render();
+    }, SPINNER_DELAY_MS);
+  }
+
+  /** Clear the spinner (and its transient line) before any real output. */
+  disarm(): void {
+    if (this.armTimer) clearTimeout(this.armTimer);
+    if (this.tick) clearInterval(this.tick);
+    this.armTimer = undefined;
+    this.tick = undefined;
+    if (this.drawn) {
+      write('\r\x1b[K');
+      this.drawn = false;
+    }
+  }
+
+  private render(): void {
+    const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(1);
+    this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
+    write(`\r\x1b[K${dim(`${SPINNER_FRAMES[this.frame]} working… ${elapsed}s`)}`);
+  }
+}
+
 function ensureNewline(st: RenderState): void {
   if (!st.atLineStart) {
     write('\n');
@@ -104,7 +153,7 @@ function renderEvent(ev: AgentEvent, st: RenderState): void {
       write(dim(`→ ${ev.name} ${ev.summary}`) + '\n');
       break;
     case 'tool_end':
-      write(dim(`  ${ev.ok ? '✓' : '✗'} ${ev.summary}`) + '\n');
+      write(`  ${ev.ok ? green('✓') : red('✗')} ${dim(ev.summary)}` + '\n');
       break;
     case 'step': {
       ensureNewline(st);
@@ -138,11 +187,22 @@ async function chatTurn(session: CliSession, input: string, signal?: AbortSignal
   // mid-turn (they never mutate the old message objects).
   const snapshot = session.messages.slice();
   const st = newRenderState();
+  const spinner = new Spinner();
   try {
-    for await (const ev of runTurn(session, input, signal)) renderEvent(ev, st);
+    // Drive the iterator manually so a spinner can fill the wait for each
+    // next event, disarmed the instant one arrives.
+    const it = runTurn(session, input, signal)[Symbol.asyncIterator]();
+    while (true) {
+      spinner.arm(st.atLineStart);
+      const { value, done } = await it.next();
+      spinner.disarm();
+      if (done) break;
+      renderEvent(value, st);
+    }
     ensureNewline(st);
     session.store?.append(session.messages);
   } catch (err) {
+    spinner.disarm();
     session.messages = snapshot;
     ensureNewline(st);
     if (isAbortError(err)) {
