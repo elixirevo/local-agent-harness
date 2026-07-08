@@ -22,13 +22,25 @@ export interface ToolResult {
   display?: string;
 }
 
+/** What we last saw for a file: the optimistic-lock state for write/edit. */
+export interface FileMark {
+  /** mtimeMs at our last Read (or last write by us) — the fast-path lock key. */
+  mtimeMs: number;
+  /**
+   * Content hash at that point. When mtime alone changes (a formatter, an
+   * editor, `touch`, a preview server rewriting identical bytes) the content
+   * check keeps it from being a false "file was modified" conflict.
+   */
+  hash: string;
+}
+
 export interface ToolContext {
   cwd: string;
   /**
-   * Absolute path → mtimeMs at last Read (or last write by us). The code half
-   * of the read-before-edit contract: prompts teach it, this enforces it.
+   * Absolute path → what we last saw. The code half of the read-before-edit
+   * contract: prompts teach it, this enforces it.
    */
-  readFiles: Map<string, number>;
+  readFiles: Map<string, FileMark>;
 }
 
 export type RiskLevel = 'read' | 'mutate' | 'destructive';

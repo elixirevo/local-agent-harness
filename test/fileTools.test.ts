@@ -57,18 +57,37 @@ describe('Write', () => {
     expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('original');
   });
 
-  it('overwrites after a read, and detects external modification', async () => {
+  it('overwrites after a read, and blocks a real external content change', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'original' });
     await readTool.call({ file_path: 'a.ts' }, ctx);
     expect((await writeTool.call({ file_path: 'a.ts', content: 'v2' }, ctx)).ok).toBe(true);
 
-    // simulate an external editor touching the file after our read
+    // an external editor rewrites the file with different content after our write
     const abs = path.join(dir, 'a.ts');
-    ctx.readFiles.set(abs, ctx.readFiles.get(abs)! - 5);
+    fs.writeFileSync(abs, 'edited by someone else', 'utf8');
+    const mark = ctx.readFiles.get(abs)!;
+    ctx.readFiles.set(abs, { ...mark, mtimeMs: mark.mtimeMs - 5 }); // force the mtime fast-path to miss
+
     const res = await writeTool.call({ file_path: 'a.ts', content: 'v3' }, ctx);
     expect(res.ok).toBe(false);
-    expect(res.output).toContain('unexpectedly modified');
+    expect(res.output).toContain('modified on disk');
+    expect(fs.readFileSync(abs, 'utf8')).toBe('edited by someone else'); // not clobbered
+  });
+
+  it('allows a write when only the mtime changed (content identical)', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'original' });
+    await readTool.call({ file_path: 'a.ts' }, ctx);
+
+    // a formatter/touch/preview-server bumps mtime without changing the bytes
+    const abs = path.join(dir, 'a.ts');
+    const mark = ctx.readFiles.get(abs)!;
+    ctx.readFiles.set(abs, { ...mark, mtimeMs: mark.mtimeMs - 5 });
+
+    const res = await writeTool.call({ file_path: 'a.ts', content: 'v2' }, ctx);
+    expect(res.ok).toBe(true);
+    expect(fs.readFileSync(abs, 'utf8')).toBe('v2');
   });
 });
 
@@ -115,7 +134,7 @@ describe('Edit', () => {
     expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('bar();\nbar();\n');
   });
 
-  it('rejects missing old_string, identical strings, and stale mtime', async () => {
+  it('rejects missing old_string and identical strings', async () => {
     const { dir, ctx } = tmpCtx();
     seed(dir, { 'a.ts': 'hello' });
     await readFirst(dir, ctx);
@@ -125,11 +144,31 @@ describe('Edit', () => {
     expect(
       (await editTool.call({ file_path: 'a.ts', old_string: 'absent', new_string: 'x' }, ctx)).output,
     ).toContain('not found');
+  });
 
+  it('blocks an edit when the content changed on disk since the read', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'hello' });
+    await readFirst(dir, ctx);
     const abs = path.join(dir, 'a.ts');
-    ctx.readFiles.set(abs, ctx.readFiles.get(abs)! - 5);
+    fs.writeFileSync(abs, 'hello world', 'utf8'); // external change
+    const mark = ctx.readFiles.get(abs)!;
+    ctx.readFiles.set(abs, { ...mark, mtimeMs: mark.mtimeMs - 5 });
     const res = await editTool.call({ file_path: 'a.ts', old_string: 'hello', new_string: 'bye' }, ctx);
-    expect(res.output).toContain('unexpectedly modified');
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain('modified on disk');
+  });
+
+  it('allows an edit when only the mtime changed (content identical)', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.ts': 'hello' });
+    await readFirst(dir, ctx);
+    const abs = path.join(dir, 'a.ts');
+    const mark = ctx.readFiles.get(abs)!;
+    ctx.readFiles.set(abs, { ...mark, mtimeMs: mark.mtimeMs - 5 }); // touch, same bytes
+    const res = await editTool.call({ file_path: 'a.ts', old_string: 'hello', new_string: 'bye' }, ctx);
+    expect(res.ok).toBe(true);
+    expect(fs.readFileSync(abs, 'utf8')).toBe('bye');
   });
 
   it('recovers old_string that includes line-number prefixes from Read', async () => {

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import type { PromptTier } from '../models/profile.js';
-import { relPath, resolvePath } from './read.js';
+import { hashContent, relPath, resolvePath } from './read.js';
 import { err, type Tool, type ToolResult } from './types.js';
 
 const CONTEXT_LINES = 3;
@@ -54,12 +54,17 @@ export const editTool: Tool = {
     } catch {
       return err(`File not found: ${abs}.`);
     }
-    const readMtime = ctx.readFiles.get(abs);
-    if (readMtime === undefined) {
+    const mark = ctx.readFiles.get(abs);
+    if (mark === undefined) {
       return err(`You must Read ${abs} before editing it.`);
     }
-    if (stat.mtimeMs !== readMtime) {
-      return err('File has been unexpectedly modified since you read it. Read it again before editing.');
+    // mtime is the fast path; fall back to a content hash so an mtime-only
+    // change (a formatter, an editor, a preview server rewriting identical
+    // bytes) is not a false conflict — only a real content change blocks.
+    if (stat.mtimeMs !== mark.mtimeMs && hashContent(fs.readFileSync(abs)) !== mark.hash) {
+      return err(
+        'File was modified on disk (its content changed) since you last read it. Read it again before editing.',
+      );
     }
 
     const text = fs.readFileSync(abs, 'utf8');
@@ -90,7 +95,7 @@ export const editTool: Tool = {
 
     const updated = replaceAll ? text.split(target).join(newString) : text.replace(target, newString);
     fs.writeFileSync(abs, updated, 'utf8');
-    ctx.readFiles.set(abs, fs.statSync(abs).mtimeMs);
+    ctx.readFiles.set(abs, { mtimeMs: fs.statSync(abs).mtimeMs, hash: hashContent(updated) });
 
     const n = replaceAll ? count : 1;
     return {

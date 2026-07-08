@@ -194,7 +194,7 @@ interface Tool {
 |---|---|---|
 | `Read` | cat -n 라인 넘버 포맷, 기본 2000줄 제한, 초과 시 offset/limit 안내 | 읽은 파일 mtime 추적 (Edit 전제조건용) |
 | `Write` | 기존 파일이면 선행 Read 필수, "문서 파일 임의 생성 금지" | read-before-write 검사 |
-| `Edit` | old_string 정확 일치 + 유일성, 라인 프리픽스 제거 규칙 명시 | read-before-edit, 유일성 검증, mtime 변경 감지("File has been unexpectedly modified") |
+| `Edit` | old_string 정확 일치 + 유일성, 라인 프리픽스 제거 규칙 명시 | read-before-edit, 유일성 검증, 디스크 변경 감지(mtime 빠른 경로 + 내용 해시 폴백 → mtime만 바뀐 오탐 방지) |
 | `Glob` | mtime 정렬 반환 | — |
 | `Grep` | ripgrep 기반, "검색은 반드시 이 도구로" 라우팅 문구 | Bash에서 grep/find 감지 시 리마인더 |
 | `Bash` | 타임아웃 기본 2분, 출력 30k자 잘림+탈출구, 병렬/순차 규칙, git 안전 규칙(NEVER force-push 등) 축약판 | 명령 분류기(읽기/쓰기/파괴적), 위험 패턴은 auto 모드에서도 ask로 승격 |

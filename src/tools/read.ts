@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PromptTier } from '../models/profile.js';
@@ -8,6 +9,11 @@ const MAX_LINE_CHARS = 2000;
 
 export function resolvePath(p: string, ctx: ToolContext): string {
   return path.isAbsolute(p) ? path.normalize(p) : path.resolve(ctx.cwd, p);
+}
+
+/** Fast content fingerprint for the write/edit optimistic lock (not security). */
+export function hashContent(data: Buffer | string): string {
+  return crypto.createHash('sha1').update(data).digest('hex');
 }
 
 export function relPath(abs: string, ctx: ToolContext): string {
@@ -59,11 +65,11 @@ export const readTool: Tool = {
     }
     const raw = fs.readFileSync(abs);
     if (raw.subarray(0, 8192).includes(0)) {
-      ctx.readFiles.set(abs, stat.mtimeMs);
+      ctx.readFiles.set(abs, { mtimeMs: stat.mtimeMs, hash: hashContent(raw) });
       return err(`${abs} looks like a binary file (${stat.size} bytes) — not showing its content.`);
     }
     const text = raw.toString('utf8');
-    ctx.readFiles.set(abs, stat.mtimeMs);
+    ctx.readFiles.set(abs, { mtimeMs: stat.mtimeMs, hash: hashContent(raw) });
     if (text.length === 0) {
       return { ok: true, output: '(the file exists but is empty)', display: 'empty file' };
     }
