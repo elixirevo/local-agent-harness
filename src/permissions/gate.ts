@@ -6,13 +6,22 @@ export type PermissionMode = 'readonly' | 'ask' | 'auto' | 'plan';
 
 export const PERMISSION_MODES: PermissionMode[] = ['readonly', 'ask', 'auto'];
 
-/** Asks the user to approve a call; summary is e.g. "Write(src/app.ts)". */
-export type AskFn = (summary: string) => Promise<boolean>;
+/** The user's answer to an approval prompt. */
+export type Approval = 'once' | 'always' | 'deny';
+
+/**
+ * Asks the user to approve a call; summary is e.g. "Write(src/app.ts)".
+ * allowAlways is false for destructive calls, so "always" is never offered
+ * for them.
+ */
+export type AskFn = (summary: string, allowAlways: boolean) => Promise<Approval>;
 
 export interface GateDecision {
   allowed: boolean;
   /** Model-facing reason on denial. */
   reason?: string;
+  /** UI hint: this call was auto-allowed by a prior "always" for its tool. */
+  autoAllowed?: boolean;
 }
 
 export class PermissionGate {
@@ -22,6 +31,12 @@ export class PermissionGate {
     private readonly askFn?: AskFn,
     /** In plan mode, the single file mutations are allowed to touch. */
     private readonly planFile?: string,
+    /**
+     * Tool names the user approved with "always" this session. Shared across
+     * gate rebuilds (mode/plan toggles) by passing the same Set in.
+     * Destructive calls are never satisfied by it.
+     */
+    private readonly sessionAllow: Set<string> = new Set(),
   ) {}
 
   async check(tool: Tool, input: Record<string, unknown>, ctx: ToolContext): Promise<GateDecision> {
@@ -42,6 +57,10 @@ export class PermissionGate {
       // this is the code half of the double defense.
       return { allowed: false, reason: 'the session is in read-only mode' };
     }
+    // Session allowlist from a prior "always" — never for destructive calls.
+    if (risk !== 'destructive' && this.sessionAllow.has(tool.name)) {
+      return { allowed: true, autoAllowed: true };
+    }
     if (this.mode === 'auto' && risk === 'mutate') {
       const target = tool.pathOf?.(input, ctx);
       const outsideCwd = target !== undefined && isOutside(this.cwd, target);
@@ -57,8 +76,14 @@ export class PermissionGate {
       };
     }
     const summary = `${tool.name}(${tool.summarize(input, ctx)})${risk === 'destructive' ? ' [destructive]' : ''}`;
-    const approved = await this.askFn(summary);
-    return approved ? { allowed: true } : { allowed: false, reason: 'the user denied this call' };
+    const approval = await this.askFn(summary, risk !== 'destructive');
+    if (approval === 'always' && risk !== 'destructive') {
+      this.sessionAllow.add(tool.name);
+      return { allowed: true };
+    }
+    // A stray "always" on a destructive call is treated as a one-time yes.
+    if (approval === 'always' || approval === 'once') return { allowed: true };
+    return { allowed: false, reason: 'the user denied this call' };
   }
 }
 
