@@ -1,3 +1,50 @@
+import { displayWidth } from './ansi.js';
+
+export interface InputView {
+  /** Windowed value text (no prompt, no color, no … marker). */
+  visible: string;
+  /** True when text is hidden to the left (a … marker should precede visible). */
+  leftTrunc: boolean;
+  /** 1-based terminal column of the cursor, including the prompt. */
+  cursorCol: number;
+}
+
+/**
+ * Compute the visible slice of an input line and the cursor column, in
+ * terminal COLUMNS (wide CJK/Hangul chars are 2 columns). Pure so the
+ * width math — which broke Hangul cursor placement — is unit-testable.
+ */
+export function computeInputView(value: string, cursor: number, cols: number, promptWidth: number): InputView {
+  const avail = Math.max(8, cols - promptWidth - 1);
+  const chars = [...value];
+  const w = chars.map((c) => displayWidth(c));
+  const widthTo = (i: number) => w.slice(0, i).reduce((a, b) => a + b, 0);
+  const total = widthTo(chars.length);
+
+  if (total <= avail) {
+    return { visible: chars.join(''), leftTrunc: false, cursorCol: promptWidth + widthTo(cursor) + 1 };
+  }
+  // Widest window ending at the cursor that fits `avail` columns.
+  let start = cursor;
+  let used = 0;
+  while (start > 0 && used + w[start - 1] <= avail - 1) {
+    start--;
+    used += w[start];
+  }
+  let end = cursor;
+  while (end < chars.length && used + w[end] <= avail - 1) {
+    used += w[end];
+    end++;
+  }
+  const leftTrunc = start > 0;
+  const visStart = leftTrunc ? start + 1 : start;
+  return {
+    visible: chars.slice(visStart, end).join(''),
+    leftTrunc,
+    cursorCol: promptWidth + (leftTrunc ? 1 : 0) + (widthTo(cursor) - widthTo(visStart)) + 1,
+  };
+}
+
 /**
  * Pure line-editor state — no terminal I/O, so the raw-mode TUI's editing
  * logic is unit-testable. The TUI feeds it keys and renders `value`/`cursor`.

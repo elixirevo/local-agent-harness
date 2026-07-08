@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { filterCommands, InputLine, type SlashCommand } from '../src/cli/editor.js';
+import { charWidth, displayWidth } from '../src/cli/ansi.js';
+import { computeInputView, filterCommands, InputLine, type SlashCommand } from '../src/cli/editor.js';
 
 describe('InputLine', () => {
   it('inserts, moves the cursor, and backspaces', () => {
@@ -72,6 +73,46 @@ describe('InputLine', () => {
     expect(l.value).toBe('x');
     l.historyPrev();
     expect(l.value).toBe('x'); // only one entry
+  });
+});
+
+describe('displayWidth (CJK-aware)', () => {
+  it('counts Hangul and CJK as 2 columns, ASCII as 1', () => {
+    expect(charWidth('a'.codePointAt(0)!)).toBe(1);
+    expect(charWidth('가'.codePointAt(0)!)).toBe(2); // composed Hangul syllable
+    expect(charWidth('中'.codePointAt(0)!)).toBe(2);
+    expect(displayWidth('안녕')).toBe(4);
+    expect(displayWidth('hi 안녕')).toBe(3 + 4);
+    expect(displayWidth('')).toBe(0);
+  });
+});
+
+describe('computeInputView (cursor column math)', () => {
+  const promptW = 2; // "❯ "
+
+  it('places the cursor by column width, not char count, for Hangul', () => {
+    // "안녕" = 4 columns; cursor after both chars sits at prompt(2)+4+1 = 7.
+    const v = computeInputView('안녕', 2, 80, promptW);
+    expect(v.leftTrunc).toBe(false);
+    expect(v.visible).toBe('안녕');
+    expect(v.cursorCol).toBe(7);
+    // cursor between the two syllables → prompt(2)+2+1 = 5
+    expect(computeInputView('안녕', 1, 80, promptW).cursorCol).toBe(5);
+  });
+
+  it('mixes ASCII and Hangul widths correctly', () => {
+    // "ab가" → widths 1,1,2; cursor at end → 2 + 4 + 1 = 7
+    expect(computeInputView('ab가', 3, 80, promptW).cursorCol).toBe(7);
+  });
+
+  it('horizontally scrolls a long Hangul line without exceeding the width', () => {
+    const long = '가'.repeat(40); // 80 columns of Hangul
+    const view = computeInputView(long, 40, 20, promptW);
+    expect(view.leftTrunc).toBe(true);
+    // visible portion must fit the available columns (cols - prompt - 1)
+    expect(displayWidth(view.visible) + 1 /* … */).toBeLessThanOrEqual(20 - promptW);
+    // cursor stays within the terminal
+    expect(view.cursorCol).toBeLessThanOrEqual(20);
   });
 });
 

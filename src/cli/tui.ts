@@ -1,6 +1,6 @@
 import type { Approval } from '../permissions/gate.js';
-import { bold, cyan, dim, green, red } from './ansi.js';
-import { filterCommands, InputLine, type SlashCommand } from './editor.js';
+import { bold, cyan, dim, displayWidth, green, red } from './ansi.js';
+import { computeInputView, filterCommands, InputLine, type SlashCommand } from './editor.js';
 import type { ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
@@ -253,18 +253,11 @@ export class RawTui implements ReplUi {
   }
 
   private renderInput(): { text: string; cursorCol: number } {
-    const avail = Math.max(8, this.cols - PROMPT.length - 1);
-    const value = this.input.value;
-    const cursor = this.input.cursorPos;
-    if (value.length <= avail) {
-      return { text: cyan(PROMPT) + value, cursorCol: PROMPT.length + cursor + 1 };
-    }
-    // Horizontal scroll so the cursor stays visible; mark truncation with ….
-    let start = Math.max(0, cursor - avail + 1);
-    const window = value.slice(start, start + avail);
-    const shownCol = PROMPT.length + (cursor - start) + 1;
-    const prefix = start > 0 ? dim('…') : '';
-    return { text: cyan(PROMPT) + prefix + window.slice(prefix ? 1 : 0), cursorCol: shownCol };
+    // Work in terminal columns, not code points: CJK/Hangul take 2 columns,
+    // so char counts would misplace the cursor and let wide lines wrap onto
+    // the hint row (the overlap bug).
+    const view = computeInputView(this.input.value, this.input.cursorPos, this.cols, displayWidth(PROMPT));
+    return { text: cyan(PROMPT) + (view.leftTrunc ? dim('…') : '') + view.visible, cursorCol: view.cursorCol };
   }
 
   private renderHint(): string {
