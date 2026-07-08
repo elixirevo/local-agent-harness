@@ -34,6 +34,7 @@ Options:
                                destructive commands always ask
       --plan                   start in plan mode: read-only exploration, mutations
                                allowed only in .harness/plan.md (toggle with /plan)
+      --plain                  use the simple line-by-line REPL (no pinned input bar)
       --protocol <p>           native | text | none — force the tool protocol
                                (default: native if the model profile supports it, else text)
       --tier <t>               minimal | standard | full — system prompt tier
@@ -62,6 +63,7 @@ async function main(): Promise<void> {
       prompt: { type: 'string', short: 'p' },
       'permission-mode': { type: 'string', short: 'M' },
       plan: { type: 'boolean' },
+      plain: { type: 'boolean' },
       protocol: { type: 'string' },
       tier: { type: 'string' },
       resume: { type: 'string' },
@@ -203,6 +205,7 @@ async function main(): Promise<void> {
   const planMode = values.plan === true;
   const planFile = planFilePath(cwd);
   if (planMode) reminders.enqueue(planModeEnterReminder(planFile));
+  const sessionAllow = new Set<string>();
 
   const session: CliSession = {
     provider,
@@ -214,10 +217,10 @@ async function main(): Promise<void> {
     think: profile.thinking === 'none' ? undefined : !values['no-think'],
     messages,
     registry,
-    // The REPL swaps in a gate wired to its readline for interactive approval.
+    // The REPL swaps in a gate wired to its UI for interactive approval.
     gate: planMode
-      ? new PermissionGate('plan', cwd, undefined, planFile)
-      : new PermissionGate(mode, cwd, undefined),
+      ? new PermissionGate('plan', cwd, undefined, planFile, sessionAllow)
+      : new PermissionGate(mode, cwd, undefined, undefined, sessionAllow),
     toolCtx: { cwd, readFiles: new Map() },
     maxSteps: config.maxSteps,
     protocol,
@@ -228,6 +231,8 @@ async function main(): Promise<void> {
     onCompacted: (compacted) => store?.recordCompaction(compacted),
     baseMode: mode,
     planMode,
+    plain: values.plain === true,
+    sessionAllow,
     mcp,
   };
 

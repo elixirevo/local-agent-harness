@@ -5,7 +5,7 @@ import { DEFAULT_COMPACTION, type CompactionSettings } from '../src/context/budg
 import { ReminderQueue } from '../src/context/reminders.js';
 import { runTurn, type AgentEvent, type AgentSession } from '../src/core/loop.js';
 import { resolveProfile } from '../src/models/profile.js';
-import { PermissionGate, type PermissionMode } from '../src/permissions/gate.js';
+import { PermissionGate, type AskFn, type PermissionMode } from '../src/permissions/gate.js';
 import type {
   ChatChunk,
   ChatRequest,
@@ -73,7 +73,8 @@ function makeSession(
   opts: {
     mode?: PermissionMode;
     maxSteps?: number;
-    ask?: (s: string) => Promise<boolean>;
+    ask?: AskFn;
+    sessionAllow?: Set<string>;
     protocol?: 'native' | 'text' | 'none';
     compaction?: Partial<CompactionSettings>;
   } = {},
@@ -87,7 +88,7 @@ function makeSession(
     think: undefined,
     messages: [{ role: 'system', content: 'sys' }],
     registry: defaultRegistry(),
-    gate: new PermissionGate(mode, toolCtx.cwd, opts.ask),
+    gate: new PermissionGate(mode, toolCtx.cwd, opts.ask, undefined, opts.sessionAllow),
     toolCtx,
     maxSteps: opts.maxSteps ?? 20,
     protocol: opts.protocol ?? 'native',
@@ -246,12 +247,34 @@ describe('runTurn', () => {
       toolStep(call('c1', 'Write', { file_path: 'x.ts', content: 'boom' })),
       textStep('understood'),
     ]);
-    const session = makeSession(provider, ctx, { mode: 'ask', ask: async () => false });
+    const session = makeSession(provider, ctx, { mode: 'ask', ask: async () => 'deny' });
     await collectEvents(runTurn(session, 'write something'));
     expect(fs.existsSync(path.join(dir, 'x.ts'))).toBe(false);
     const toolMsg = provider.received[1].messages.find((m) => m.role === 'tool');
     expect(toolMsg?.content).toContain('permission denied');
     expect(toolMsg?.content).toContain('Do not retry');
+  });
+
+  it('stops asking for a tool after the user approves it with "always"', async () => {
+    const { dir, ctx } = tmpCtx();
+    let asks = 0;
+    const provider = new ScriptedProvider([
+      toolStep(call('c1', 'Write', { file_path: 'a.ts', content: '1' })),
+      toolStep(call('c2', 'Write', { file_path: 'b.ts', content: '2' })),
+      textStep('done'),
+    ]);
+    const session = makeSession(provider, ctx, {
+      mode: 'ask',
+      sessionAllow: new Set(),
+      ask: async () => {
+        asks++;
+        return 'always';
+      },
+    });
+    await collectEvents(runTurn(session, 'write two files'));
+    expect(asks).toBe(1); // second Write is auto-allowed by the session allowlist
+    expect(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8')).toBe('1');
+    expect(fs.readFileSync(path.join(dir, 'b.ts'), 'utf8')).toBe('2');
   });
 
   it('intercepts an identical retry of a denied mutation without re-asking the user', async () => {
@@ -263,7 +286,7 @@ describe('runTurn', () => {
       mode: 'ask',
       ask: async () => {
         asks++;
-        return false;
+        return 'deny';
       },
     });
     await collectEvents(runTurn(session, 'write something'));
@@ -360,7 +383,7 @@ describe('runTurn', () => {
       mode: 'auto',
       ask: async (s) => {
         asked.push(s);
-        return false;
+        return 'deny';
       },
     });
     await collectEvents(runTurn(session, 'write outside'));

@@ -1,16 +1,20 @@
 import * as readline from 'node:readline/promises';
 import { compactSession } from '../compact/compact.js';
 import { budgetStatus } from '../context/budget.js';
-import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import { effectiveContextLength, type HarnessConfig } from '../config/config.js';
+import { runTurn, type AgentEvent, type AgentSession } from '../core/loop.js';
 import type { McpConnection } from '../mcp/index.js';
 import { resolveProfile } from '../models/profile.js';
-import { rememberNote } from '../session/memory.js';
 import { PermissionGate, type AskFn, type PermissionMode } from '../permissions/gate.js';
 import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
+import { rememberNote } from '../session/memory.js';
 import type { SessionStore } from '../session/store.js';
+import { bold, dim, green, red } from './ansi.js';
+import type { SlashCommand } from './editor.js';
+import { canUseRawTui, RawTui } from './tui.js';
+import { PlainUi, Spinner, type ReplUi } from './ui.js';
 
 export interface CliSession extends AgentSession {
   providerName: string;
@@ -19,17 +23,31 @@ export interface CliSession extends AgentSession {
   /** The permission mode outside plan mode (plan swaps the gate temporarily). */
   baseMode: PermissionMode;
   planMode: boolean;
+  /** Force the line-by-line UI even on a TTY (--plain). */
+  plain: boolean;
   /** Interactive approval hook, kept so plan-mode toggles can rebuild the gate. */
   askFn?: AskFn;
+  /** Tool names the user approved with "always" this session (shared with the gate). */
+  sessionAllow: Set<string>;
   mcp?: McpConnection[];
 }
 
-const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
-const dim = (s: string) => (useColor ? `\x1b[2m${s}\x1b[0m` : s);
-const bold = (s: string) => (useColor ? `\x1b[1m${s}\x1b[0m` : s);
-const green = (s: string) => (useColor ? `\x1b[32m${s}\x1b[0m` : s);
-const red = (s: string) => (useColor ? `\x1b[31m${s}\x1b[0m` : s);
-const PROMPT = useColor ? '\x1b[36m❯\x1b[0m ' : '> ';
+const PROMPT = '❯ ';
+
+export const COMMANDS: SlashCommand[] = [
+  { name: '/help', desc: 'show help' },
+  { name: '/models', desc: 'list models on the provider' },
+  { name: '/model', desc: '<id> — switch model' },
+  { name: '/provider', desc: '<name> — switch provider' },
+  { name: '/plan', desc: 'toggle plan mode (read-only + plan file)' },
+  { name: '/mcp', desc: 'list connected MCP servers' },
+  { name: '/remember', desc: '<note> — save to AGENTS.md' },
+  { name: '/session', desc: 'show where this session is saved' },
+  { name: '/context', desc: 'show the context budget' },
+  { name: '/compact', desc: 'compact the conversation now' },
+  { name: '/clear', desc: 'reset the conversation' },
+  { name: '/exit', desc: 'quit' },
+];
 
 export function friendlyFetchError(providerName: string, baseUrl: string, err: unknown): string {
   const cause = (err as { cause?: { code?: string } })?.cause;
@@ -38,6 +56,7 @@ export function friendlyFetchError(providerName: string, baseUrl: string, err: u
     ollama: 'Start it with: ollama serve',
     llamacpp: 'Start it with: llama-server --jinja -m <model.gguf>',
     vllm: 'Start it with: vllm serve <model>',
+    mlx: 'Start it with: mlx_lm.server --model <mlx-model> --port 8081',
   };
   return `Cannot reach ${providerName} at ${baseUrl}${code}. ${hints[providerName] ?? 'Is the server running?'}`;
 }
@@ -72,141 +91,87 @@ function newRenderState(): RenderState {
   return { sawThinking: false, startedText: false, atLineStart: true };
 }
 
-const write = (s: string) => process.stdout.write(s);
-
-/**
- * A transient "working…" line for the silent gaps — tool execution, prompt
- * prefill, compaction. Armed before every awaited event but only actually
- * drawn after a short delay, so a fast stream of tokens (each its own event)
- * never triggers it and it appears only when the harness is genuinely waiting.
- */
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_DELAY_MS = 150;
-
-class Spinner {
-  private armTimer: NodeJS.Timeout | undefined;
-  private tick: NodeJS.Timeout | undefined;
-  private drawn = false;
-  private frame = 0;
-  private startedAt = 0;
-  private readonly enabled = Boolean(process.stdout.isTTY) && useColor;
-
-  /** Arm the spinner; it draws only if `canDraw` and the delay elapses first. */
-  arm(canDraw: boolean): void {
-    if (!this.enabled || !canDraw) return;
-    this.startedAt = Date.now();
-    this.armTimer = setTimeout(() => {
-      this.drawn = true;
-      this.tick = setInterval(() => this.render(), 90);
-      this.render();
-    }, SPINNER_DELAY_MS);
-  }
-
-  /** Clear the spinner (and its transient line) before any real output. */
-  disarm(): void {
-    if (this.armTimer) clearTimeout(this.armTimer);
-    if (this.tick) clearInterval(this.tick);
-    this.armTimer = undefined;
-    this.tick = undefined;
-    if (this.drawn) {
-      write('\r\x1b[K');
-      this.drawn = false;
-    }
-  }
-
-  private render(): void {
-    const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(1);
-    this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
-    write(`\r\x1b[K${dim(`${SPINNER_FRAMES[this.frame]} working… ${elapsed}s`)}`);
-  }
-}
-
-function ensureNewline(st: RenderState): void {
+function ensureNewline(st: RenderState, ui: ReplUi): void {
   if (!st.atLineStart) {
-    write('\n');
+    ui.write('\n');
     st.atLineStart = true;
   }
 }
 
-function renderEvent(ev: AgentEvent, st: RenderState): void {
+function renderEvent(ev: AgentEvent, st: RenderState, ui: ReplUi): void {
   switch (ev.type) {
     case 'thinking':
       if (!st.sawThinking) {
-        ensureNewline(st);
-        write(dim('[thinking] '));
+        ensureNewline(st, ui);
+        ui.write(dim('[thinking] '));
         st.sawThinking = true;
       }
-      write(dim(ev.text));
+      ui.write(dim(ev.text));
       st.atLineStart = ev.text.endsWith('\n');
       break;
     case 'text':
       if (st.sawThinking && !st.startedText) {
-        write('\n\n');
+        ui.write('\n\n');
         st.atLineStart = true;
       }
       st.startedText = true;
-      write(ev.text);
+      ui.write(ev.text);
       st.atLineStart = ev.text.endsWith('\n');
       break;
     case 'tool_start':
-      ensureNewline(st);
-      write(dim(`→ ${ev.name} ${ev.summary}`) + '\n');
+      ensureNewline(st, ui);
+      ui.write(dim(`→ ${ev.name} ${ev.summary}`) + '\n');
       break;
     case 'tool_end':
-      write(`  ${ev.ok ? green('✓') : red('✗')} ${dim(ev.summary)}` + '\n');
+      ui.write(`  ${ev.ok ? green('✓') : red('✗')} ${dim(ev.summary)}` + '\n');
       break;
     case 'step': {
-      ensureNewline(st);
+      ensureNewline(st, ui);
       if (ev.usage) {
         const ctx = ev.contextPct !== undefined ? ` · ctx ~${ev.contextPct}%` : '';
-        write(dim(formatUsage(ev.usage, ev.wallMs).replace(/]$/, `${ctx}]`)) + '\n');
+        ui.write(dim(formatUsage(ev.usage, ev.wallMs).replace(/]$/, `${ctx}]`)) + '\n');
       }
-      // a new model step starts fresh for thinking/text separation
       st.sawThinking = false;
       st.startedText = false;
       break;
     }
     case 'notice':
-      ensureNewline(st);
-      write(dim(`[note] ${ev.message}`) + '\n');
+      ensureNewline(st, ui);
+      ui.write(dim(`[note] ${ev.message}`) + '\n');
       break;
     case 'guard':
-      ensureNewline(st);
-      write(dim(`[guard] ${ev.message}`) + '\n');
+      ensureNewline(st, ui);
+      ui.write(dim(`[guard] ${ev.message}`) + '\n');
       break;
   }
 }
 
 /**
  * One user turn through the agent loop. On any failure the whole turn is
- * rolled back (messages truncated to the pre-turn snapshot) so the history
- * never contains an assistant message with dangling tool calls.
+ * rolled back (messages reset to the pre-turn snapshot) so history never
+ * carries an assistant message with dangling tool calls. The iterator is
+ * driven manually so the UI can show a "working" indicator during each wait.
  */
-async function chatTurn(session: CliSession, input: string, signal?: AbortSignal): Promise<void> {
-  // Array snapshot, not a length: FRC/compaction may replace the array
-  // mid-turn (they never mutate the old message objects).
+async function chatTurn(session: CliSession, input: string, ui: ReplUi, signal?: AbortSignal): Promise<void> {
   const snapshot = session.messages.slice();
   const st = newRenderState();
-  const spinner = new Spinner();
   try {
-    // Drive the iterator manually so a spinner can fill the wait for each
-    // next event, disarmed the instant one arrives.
     const it = runTurn(session, input, signal)[Symbol.asyncIterator]();
     while (true) {
-      spinner.arm(st.atLineStart);
+      ui.beginWait(st.atLineStart);
       const { value, done } = await it.next();
-      spinner.disarm();
+      ui.endWait();
       if (done) break;
-      renderEvent(value, st);
+      renderEvent(value, st, ui);
     }
-    ensureNewline(st);
+    ensureNewline(st, ui);
     session.store?.append(session.messages);
   } catch (err) {
-    spinner.disarm();
+    ui.endWait();
     session.messages = snapshot;
-    ensureNewline(st);
+    ensureNewline(st, ui);
     if (isAbortError(err)) {
-      console.log(dim('[interrupted — turn discarded]'));
+      ui.write(dim('[interrupted — turn discarded]') + '\n');
       return;
     }
     throw err;
@@ -218,125 +183,106 @@ function isAbortError(err: unknown): boolean {
   return e?.name === 'AbortError' || e?.code === 'ABORT_ERR';
 }
 
-function printError(session: CliSession, err: unknown): void {
+function printError(session: CliSession, ui: ReplUi, err: unknown): void {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes('fetch failed')) {
     const cfg = session.config.providers[session.providerName];
-    console.error(friendlyFetchError(session.providerName, cfg?.baseUrl ?? '?', err));
+    ui.write(red(friendlyFetchError(session.providerName, cfg?.baseUrl ?? '?', err)) + '\n');
   } else {
-    console.error(msg);
+    ui.write(red(msg) + '\n');
   }
+}
+
+/** A write-only UI for one-shot mode (no input; spinner inert on non-TTY). */
+function writeOnlyUi(): ReplUi {
+  const spinner = new Spinner();
+  return {
+    interactive: false,
+    write: (s) => void process.stdout.write(s),
+    readLine: async () => undefined,
+    ask: async () => 'deny',
+    beginWait: (c) => spinner.arm(c),
+    endWait: () => spinner.disarm(),
+    onIdle: () => {},
+    onInterrupt: () => {},
+    close: () => spinner.disarm(),
+  };
 }
 
 export async function oneShot(session: CliSession, prompt: string): Promise<void> {
   // Non-interactive: "ask" cannot prompt, so mutations are denied with a hint.
-  // Plan mode keeps its own gate (plan-file exception included).
   if (!session.planMode) {
-    session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, undefined);
+    session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, undefined, undefined, session.sessionAllow);
   }
-  await chatTurn(session, prompt);
-}
-
-/**
- * Sequential line source over readline. Lines that arrive while a turn is
- * being processed (always the case for piped stdin) are queued instead of
- * dropped — rl.question() alone loses them, which silently broke piped
- * multi-turn sessions. Both the main loop and permission prompts pull from
- * this one queue, so they can never race for a line.
- */
-class LineReader {
-  private queue: string[] = [];
-  private waiter: ((v: string | undefined) => void) | null = null;
-  private closed = false;
-
-  constructor(
-    private readonly rl: readline.Interface,
-    private readonly interactive: boolean,
-  ) {
-    rl.on('line', (line: string) => {
-      if (this.waiter) {
-        const w = this.waiter;
-        this.waiter = null;
-        w(line);
-      } else {
-        this.queue.push(line);
-      }
-    });
-    rl.on('close', () => {
-      this.closed = true;
-      if (this.waiter) {
-        const w = this.waiter;
-        this.waiter = null;
-        w(undefined);
-      }
-    });
-  }
-
-  /** Resolve the next line, or undefined at EOF/close. */
-  next(promptText: string): Promise<string | undefined> {
-    const queued = this.queue.shift();
-    if (queued !== undefined) return Promise.resolve(queued);
-    if (this.closed) return Promise.resolve(undefined);
-    if (this.interactive) {
-      this.rl.setPrompt(promptText);
-      this.rl.prompt();
-    }
-    return new Promise((resolve) => {
-      this.waiter = resolve;
-    });
+  const ui = writeOnlyUi();
+  try {
+    await chatTurn(session, prompt, ui);
+  } finally {
+    ui.close();
   }
 }
 
 export async function runRepl(session: CliSession): Promise<void> {
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (interactive) printBanner(session);
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: interactive ? process.stdout : undefined,
-    terminal: interactive,
-  });
-  const reader = new LineReader(rl, interactive);
-  const ask: AskFn | undefined = interactive
-    ? async (summary) => {
-        const answer = await reader.next(`${bold('allow')} ${summary}? [y/N] `);
-        return ['y', 'yes'].includes((answer ?? '').trim().toLowerCase());
-      }
-    : undefined;
-  session.askFn = ask;
-  if (!session.planMode) {
-    session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, ask);
+  const useRaw = !session.plain && canUseRawTui();
+  let ui: ReplUi;
+  if (useRaw) {
+    ui = new RawTui(COMMANDS);
+  } else {
+    const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: interactive ? process.stdout : undefined,
+      terminal: interactive,
+    });
+    ui = new PlainUi(rl, interactive);
   }
+
+  session.askFn = ui.interactive ? (summary, allowAlways) => ui.ask(summary, allowAlways) : undefined;
+  if (!session.planMode) {
+    session.gate = new PermissionGate(
+      session.baseMode,
+      session.toolCtx.cwd,
+      session.askFn,
+      undefined,
+      session.sessionAllow,
+    );
+  }
+
+  printBanner(session, ui);
 
   let currentAbort: AbortController | null = null;
-  rl.on('SIGINT', () => {
-    if (currentAbort) {
-      currentAbort.abort();
-    } else {
-      write('\n');
-      rl.close();
-    }
+  ui.onInterrupt(() => {
+    if (currentAbort) currentAbort.abort();
+    else ui.close();
   });
 
-  while (true) {
-    const line = await reader.next(PROMPT);
-    if (line === undefined) break; // Ctrl+C at prompt, Ctrl+D, or stdin EOF
-    const input = line.trim();
-    if (!input) continue;
-    if (input.startsWith('/')) {
-      if (await handleCommand(session, input)) break;
-      continue;
+  try {
+    while (true) {
+      const lineIn = await ui.readLine(PROMPT);
+      if (lineIn === undefined) break;
+      const input = lineIn.trim();
+      if (!input) {
+        ui.onIdle();
+        continue;
+      }
+      if (input.startsWith('/')) {
+        if (await handleCommand(session, input, ui)) break;
+        ui.onIdle();
+        continue;
+      }
+      currentAbort = new AbortController();
+      try {
+        await chatTurn(session, input, ui, currentAbort.signal);
+      } catch (err) {
+        printError(session, ui, err);
+      } finally {
+        currentAbort = null;
+        ui.onIdle();
+      }
     }
-    currentAbort = new AbortController();
-    try {
-      await chatTurn(session, input, currentAbort.signal);
-    } catch (err) {
-      printError(session, err);
-    } finally {
-      currentAbort = null;
-    }
+  } finally {
+    ui.close();
   }
-  rl.close();
 }
 
 function toolsLine(session: CliSession): string {
@@ -346,66 +292,64 @@ function toolsLine(session: CliSession): string {
   return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}${plan}`;
 }
 
-function printBanner(session: CliSession): void {
+function printBanner(session: CliSession, ui: ReplUi): void {
+  const l = (s = '') => ui.write(s + '\n');
   const p = session.profile;
-  console.log(bold('agent-harness v0.1.0'));
-  console.log(
+  l(bold('agent-harness v0.1.0'));
+  l(
     `provider: ${session.providerName} · model: ${session.model} ` +
       dim(`(family ${p.family} · ctx ${session.contextLength} · thinking ${p.thinking})`),
   );
-  console.log(dim(toolsLine(session)));
-  console.log(dim('/help for commands'));
-  console.log();
+  l(dim(toolsLine(session)));
+  l(dim('/help for commands'));
+  l();
 }
 
-const HELP = `commands:
-  /help               show this help
-  /models             list models on the current provider
-  /model <id>         switch model (re-resolves its profile)
-  /provider <name>    switch provider (configured in harness.config.json)
-  /plan               toggle plan mode (read-only + a single plan file)
-  /mcp                list connected MCP servers and their tools
-  /remember <note>    append a note to AGENTS.md (picked up next session)
-  /session            show where this conversation is being saved
-  /context            show the context budget estimate
-  /compact            summarize the conversation now to free context
-  /clear              reset conversation (keeps system prompt)
-  /exit               quit`;
+function helpText(): string {
+  return ['commands:', ...COMMANDS.map((c) => `  ${c.name.padEnd(11)} ${c.desc}`)].join('\n');
+}
 
 /** Returns true when the REPL should exit. */
-async function handleCommand(session: CliSession, input: string): Promise<boolean> {
+async function handleCommand(session: CliSession, input: string, ui: ReplUi): Promise<boolean> {
   const [cmd, ...rest] = input.split(/\s+/);
   const arg = rest.join(' ');
+  const l = (s = '') => ui.write(s + '\n');
   switch (cmd) {
     case '/exit':
     case '/quit':
       return true;
     case '/help':
-      console.log(HELP);
+      l(helpText());
       return false;
     case '/plan': {
       const planFile = planFilePath(session.toolCtx.cwd);
       session.planMode = !session.planMode;
       if (session.planMode) {
-        session.gate = new PermissionGate('plan', session.toolCtx.cwd, undefined, planFile);
+        session.gate = new PermissionGate('plan', session.toolCtx.cwd, undefined, planFile, session.sessionAllow);
         session.reminders.enqueue(planModeEnterReminder(planFile));
-        console.log(dim(`plan mode ON — mutations restricted to ${planFile}`));
+        l(dim(`plan mode ON — mutations restricted to ${planFile}`));
       } else {
-        session.gate = new PermissionGate(session.baseMode, session.toolCtx.cwd, session.askFn);
+        session.gate = new PermissionGate(
+          session.baseMode,
+          session.toolCtx.cwd,
+          session.askFn,
+          undefined,
+          session.sessionAllow,
+        );
         session.reminders.enqueue(planModeExitReminder(planFile));
-        console.log(dim(`plan mode OFF (permission mode: ${session.baseMode})`));
+        l(dim(`plan mode OFF (permission mode: ${session.baseMode})`));
       }
       return false;
     }
     case '/mcp': {
       if (!session.mcp || session.mcp.length === 0) {
-        console.log(dim('(no MCP servers configured — add mcpServers to harness.config.json)'));
+        l(dim('(no MCP servers configured — add mcpServers to harness.config.json)'));
         return false;
       }
       for (const c of session.mcp) {
-        if (c.error) console.log(`${c.client.name}: ${dim(`connection failed — ${c.error}`)}`);
+        if (c.error) l(`${c.client.name}: ${dim(`connection failed — ${c.error}`)}`);
         else
-          console.log(
+          l(
             `${c.client.name} (${c.client.serverInfo?.name ?? '?'}): ${c.toolNames.length ? c.toolNames.join(', ') : dim('(no tools)')}`,
           );
       }
@@ -413,19 +357,19 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
     }
     case '/remember': {
       if (!arg) {
-        console.log(dim('usage: /remember <note to save to AGENTS.md>'));
+        l(dim('usage: /remember <note to save to AGENTS.md>'));
         return false;
       }
       try {
         const { file, created } = rememberNote(session.toolCtx.cwd, arg);
-        console.log(dim(`${created ? 'created' : 'updated'} ${file}`));
+        l(dim(`${created ? 'created' : 'updated'} ${file}`));
       } catch (err) {
-        printError(session, err);
+        printError(session, ui, err);
       }
       return false;
     }
     case '/session':
-      console.log(session.store ? session.store.file : dim('(session saving is disabled)'));
+      l(session.store ? session.store.file : dim('(session saving is disabled)'));
       return false;
     case '/context': {
       const defs =
@@ -433,7 +377,7 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
           ? session.registry.toolDefs(session.gate.mode, session.profile.promptTier)
           : [];
       const s = budgetStatus(session.messages, session.contextLength, session.compaction, defs);
-      console.log(
+      l(
         `~${s.estimatedTokens} of ${s.usableTokens} usable tokens (${Math.round(s.usage * 100)}%) · ` +
           `${session.messages.length} messages · window ${session.contextLength} (reserve ${session.compaction.reserveTokens})`,
       );
@@ -452,47 +396,47 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
         session.messages = result.messages;
         session.toolCtx.readFiles.clear();
         session.store?.recordCompaction(result.messages);
-        console.log(
+        l(
           dim(
             `compacted ~${result.beforeTokens} → ~${result.afterTokens} tok${result.degraded ? ' (summary failed validation)' : ''}`,
           ),
         );
       } catch (err) {
-        printError(session, err);
+        printError(session, ui, err);
       }
       return false;
     }
     case '/clear':
       session.messages = session.messages.slice(0, 1);
       session.toolCtx.readFiles.clear();
-      console.log(dim('conversation cleared'));
+      l(dim('conversation cleared'));
       return false;
     case '/models': {
       try {
         const models = await session.provider.listModels();
-        console.log(models.length ? models.join('\n') : dim('(no models)'));
+        l(models.length ? models.join('\n') : dim('(no models)'));
       } catch (err) {
-        printError(session, err);
+        printError(session, ui, err);
       }
       return false;
     }
     case '/model': {
       if (!arg) {
-        console.log(`current model: ${session.model}`);
+        l(`current model: ${session.model}`);
         return false;
       }
       session.model = arg;
       session.profile = resolveProfile(arg, session.config.models);
       session.contextLength = effectiveContextLength(session.profile, session.config);
       session.think = session.profile.thinking === 'none' ? undefined : true;
-      console.log(
+      l(
         dim(
           `model → ${arg} (family ${session.profile.family} · ctx ${session.contextLength} · thinking ${session.profile.thinking})`,
         ),
       );
       const wantsNative = session.profile.nativeToolCalls;
       if ((session.protocol === 'native') !== wantsNative) {
-        console.log(
+        l(
           dim(
             `note: this model ${wantsNative ? 'supports native tool calls' : 'has no native tool-call support'} but the session protocol is "${session.protocol}" (fixed at startup) — restart to change it`,
           ),
@@ -502,23 +446,21 @@ async function handleCommand(session: CliSession, input: string): Promise<boolea
     }
     case '/provider': {
       if (!arg) {
-        console.log(`current provider: ${session.providerName}`);
+        l(`current provider: ${session.providerName}`);
         return false;
       }
       const cfg = session.config.providers[arg];
       if (!cfg) {
-        console.error(
-          `unknown provider "${arg}" — configured: ${Object.keys(session.config.providers).join(', ')}`,
-        );
+        l(red(`unknown provider "${arg}" — configured: ${Object.keys(session.config.providers).join(', ')}`));
         return false;
       }
       session.provider = createProvider(arg, cfg);
       session.providerName = arg;
-      console.log(dim(`provider → ${arg} (${cfg.baseUrl}); switch models with /model if needed`));
+      l(dim(`provider → ${arg} (${cfg.baseUrl}); switch models with /model if needed`));
       return false;
     }
     default:
-      console.error(`unknown command ${cmd} — /help for commands`);
+      l(red(`unknown command ${cmd} — /help for commands`));
       return false;
   }
 }

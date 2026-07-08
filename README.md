@@ -33,6 +33,13 @@ npm start -- -P llamacpp                     # 프로바이더 지정
 REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/plan` `/mcp` `/remember <note>`
 `/context` `/compact` `/session` `/clear` `/exit`
 
+### 터미널 UI
+
+대화형 터미널(TTY)에서는 입력창이 화면 **하단에 고정**되고 모델 출력은 그 위로 흐른다. 입력창
+아래 힌트 줄에는 `/`를 입력하면 매칭되는 슬래시 명령이, 작업 중에는 진행 인디케이터가 표시된다.
+입력 편집(←→, Home/End, Ctrl+U/K, ↑↓ 히스토리)을 지원한다. 파이프 입력·one-shot에서는 자동으로
+단순 라인 모드로 동작하며, 터미널에서도 `--plain`으로 강제할 수 있다.
+
 ### Apple MLX (Apple Silicon)
 
 vLLM은 CUDA 전용이라 Mac에서 못 쓰지만, Apple의 MLX(`mlx-lm`)는 Apple Silicon 네이티브다 —
@@ -64,8 +71,11 @@ mutate 취급.
 | 모드 | 동작 |
 |---|---|
 | `readonly` | 변이 도구(Write/Edit/Bash)를 모델에게 아예 제공하지 않음 |
-| `ask` | 변이 호출마다 y/N 확인. read 분류 Bash 명령은 자동 허용 |
+| `ask` | 변이 호출마다 확인. read 분류 Bash 명령은 자동 허용 |
 | `auto` | 작업 디렉터리 안의 변이는 자동 허용. **destructive는 항상 확인** |
+
+`ask` 모드의 승인 프롬프트는 **y(허용) / n(거부) / a(항상)** 로 답한다. `a`는 그 도구(예: Write)를
+세션 동안 다시 묻지 않도록 기억한다(파괴적 명령은 항상 확인 — a를 제공하지 않음).
 
 ## 텍스트 프로토콜 폴백
 
