@@ -1,0 +1,79 @@
+# 스킬(Skills) 지원 구현 계획
+
+> 스킬 = **파일로 저장된 재사용 워크플로우**. `/이름`으로 호출하면 검증된 단계별 지시문이 그 턴의 프롬프트로 확장된다. Claude Code의 스킬 개념을 우리 하네스에 맞게 옮기되, 소형 로컬 모델의 제약(짧은 지시만 소화, 스스로 계획 수립 못 함)에 맞춘다.
+>
+> 참고: 성숙 로드맵은 "실사용 근거 후 착수"였으나 사용자 결정으로 앞당긴다. 대신 **평가 게이트 규율은 유지** — 스킬의 효과와 모델 호출 기능의 안전성을 eval로 측정한 뒤 확장한다.
+
+## 왜 (소형 모델에 스킬이 더 유효한 근거)
+
+실측: llama3.2(3B)는 "테스트 실행→원인→수정→재검증"을 스스로 계획하지 못해 3/11로 실패했지만, Phase 2 e2e에서 단계를 명시해 주자 완주했다. 스킬은 그 "단계 명시"를 파일로 박제하는 것 — 큰 모델에겐 편의지만 **약한 모델에겐 능력 확장**이다. 단, 소형 모델은 긴 지시도 못 따르므로 스킬 본문은 짧고 구체적이어야 하며(불릿 5~8개), 효과는 eval로 검증한다.
+
+## 스킬 파일 형식
+
+```markdown
+---
+name: fix-failing-test          # 생략 시 파일명
+description: 테스트 실패 원인을 찾아 고치고 재검증    # 필수 — 힌트 바/카탈로그에 노출
+---
+1. Run the project's test command with Bash and capture the failure output.
+2. Read the failing file and locate the cause.
+3. Fix it with Edit — the minimal change only.
+4. Re-run the tests. If they still fail, go back to step 2.
+
+Task input: $ARGUMENTS
+```
+
+- 위치: `<cwd>/.harness/skills/*.md`(프로젝트) + `~/.harness/skills/*.md`(전역). 이름 충돌 시 프로젝트가 전역을 가린다.
+- 폴더형도 지원: `.harness/skills/<name>/SKILL.md` + 참고 파일. 본문에서 "자세한 규칙은 reference.md를 Read해라"로 가리키면 필요할 때만 컨텍스트에 들어온다(컨텍스트 예산 친화).
+- `$ARGUMENTS`: 호출 인자로 치환. 본문에 없으면 인자를 `\n\nInput: <args>`로 뒤에 붙인다.
+- 검증: 이름은 kebab-case, **빌트인 명령(/help, /model 등)과 충돌 금지**(로드 시 거부+경고). description 없으면 경고 후 '(no description)'.
+
+## 호출 경로 2단계
+
+**A. 사용자 호출 `/skill-name args` — S1에서 구현 (안전, 소형 모델에도 무해)**
+
+- REPL 디스패치([repl.ts:268](../src/cli/repl.ts))에서 빌트인 명령 매칭 실패 시 스킬 레지스트리 조회 → 매치되면 본문 확장 후 **일반 chatTurn으로 실행**. one-shot(`-p "/skill args"`)도 동일 헬퍼로 지원.
+- 확장 프롬프트 형태(소형 모델용 프레이밍):
+  ```
+  Follow this workflow step by step:
+  <스킬 본문, $ARGUMENTS 치환>
+  ```
+- 힌트 바 통합: RawTui는 생성 시 명령 목록을 받으므로([tui.ts:49](../src/cli/tui.ts)), **UI 생성 전에** 빌트인 COMMANDS + 스킬(이름·description)을 병합해 전달. `/f` 입력 시 `/fix-failing-test`가 자동 노출 — 발견성이 공짜로 생긴다. `/help`에 "skills:" 섹션 추가.
+- 컨텍스트 비용: 호출 전까지 0. 호출 시에만 본문이 들어간다.
+
+**B. 모델 호출 `Skill` 도구 — S3에서, eval 게이트 뒤에**
+
+- `Skill(name)` 도구를 등록(스킬이 있을 때만). 도구 description에 카탈로그(이름+한 줄 설명)를 임베드 — 스킬은 시작 시 로드되므로 세션 내 정적 → 캐시 안전.
+- 호출 결과 = 스킬 본문(도구 결과로 반환). isReadOnly: true — 남용해도 반복 가드가 잡고 부작용이 없다.
+- **게이트 조건**: eval에서 "모델이 맞는 스킬을 고르는가 / 안 필요할 때 안 부르는가"를 측정해 통과한 모델 프로파일에서만 의미. 실패하는 모델에겐 A 경로만으로 충분.
+
+## 안전 주의 (문서화 필수)
+
+스킬은 설계상 프롬프트 주입이다. 사용자 소유 디렉터리에서만 로드하고, README에 "서드파티 스킬은 코드처럼 리뷰 후 설치"를 명시한다. 시작 컨텍스트에 스킬 본문을 자동 주입하지 않는다(호출 시에만).
+
+## 구현 마일스톤
+
+**S1 — 로더 + 사용자 호출 + 힌트 통합** (반나절)
+- `src/skills/loader.ts`: 발견(양쪽 디렉터리+폴더형), frontmatter 파싱(zero-dep `---` 파서), 이름 검증·충돌 거부, `expandSkill(skill, args)`.
+- CLI 배선: main에서 로드 → 세션에 보관, repl 디스패치·`/help`·병합 명령 목록(RawTui/PlainUi 공통), one-shot 지원.
+- 유닛 테스트: 파싱(정상/깨진 frontmatter/이름 충돌/전역-프로젝트 섀도잉), $ARGUMENTS 치환, 디스패치(스크립트 프로바이더로 스킬 본문이 user 메시지로 들어가는지), 힌트 필터에 스킬 노출.
+- **완료 기준**: `.harness/skills/fix-failing-test.md`를 만들고 `/fix` 타이핑 시 힌트에 뜨고, `/fix-failing-test`가 확장 실행됨(유닛+수동).
+
+**S2 — 스타터 스킬 + e2e + 효과 측정** (반나절+컴퓨트)
+- 스타터 스킬 1~2개 작성(fix-failing-test, explore-then-summarize 등) — 문서 패턴대로 짧게.
+- eval에 A/B 시나리오 추가: 동일 과제를 ①일반 요청 vs ②스킬 확장 프롬프트로 실행, 성공률 비교. 가설 검증 대상: **약한 모델일수록 리프트가 큼** (gemma4 native + llama3.2 --protocol text 두 셀).
+- **완료 기준**: gemma4 실모델 e2e 통과 + A/B 수치 리포트(스킬 리프트가 없으면 그 사실을 기록하고 S3 보류).
+
+**S3 — 모델 호출 Skill 도구** (조건부, 반나절)
+- S2에서 스킬 효과가 확인되고, "스킬 선택 정확도" eval 시나리오(맞는 스킬 고르기/불필요 시 안 부르기)를 gemma4급이 통과할 때만.
+- **완료 기준**: 선택 정확도 시나리오 통과 + 기존 스위트 무회귀.
+
+## 기존 코드와의 접점 요약
+
+| 재사용 | 신규 |
+|---|---|
+| SlashCommand/filterCommands(힌트 바), chatTurn(실행), COMMANDS(/help) | src/skills/loader.ts (+S3: skillTool.ts) |
+| ScriptedProvider(테스트), eval 러너(A/B 시나리오) | 스타터 스킬 파일, eval 시나리오 2~3개 |
+| ToolRegistry·반복 가드 (S3의 Skill 도구) | — |
+
+신규 코드는 로더 하나가 사실상 전부 — 나머지는 기존 인프라에 얹는다.
