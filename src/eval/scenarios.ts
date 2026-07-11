@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { expandSkill, loadSkills } from '../skills/loader.js';
 
 export type ScenarioKind = 'edit' | 'debug' | 'multistep' | 'search' | 'agent';
 
@@ -57,6 +59,20 @@ function runNode(dir: string, script: string): { ok: boolean; output: string } {
     const err = e as { stdout?: string; stderr?: string; message: string };
     return { ok: false, output: `${err.stdout ?? ''}${err.stderr ?? ''}` || err.message };
   }
+}
+
+/**
+ * Skills shipped with the harness (repo skills/). The A/B scenarios expand
+ * these exact files so the eval measures what users actually get.
+ */
+const SHIPPED_SKILLS = loadSkills({
+  projectDir: fileURLToPath(new URL('../../skills', import.meta.url)),
+}).skills;
+
+function skillPrompt(name: string, args: string): string {
+  const skill = SHIPPED_SKILLS.find((s) => s.name === name);
+  if (!skill) throw new Error(`shipped skill missing: ${name} (looked in repo skills/)`);
+  return expandSkill(skill, args);
 }
 
 const CALC_BUGGY = `function add(a, b) {
@@ -199,6 +215,40 @@ export const SCENARIOS: Scenario[] = [
         'src/b.js': `const y = 2;\nmodule.exports = y;\n`,
       }),
     turns: ['Find where MAX_RETRIES is defined in this project and change its value from 3 to 5.'],
+    check: (dir) => {
+      const content = read(dir, 'src/deep/limits.js');
+      return {
+        success: content.includes('MAX_RETRIES = 5'),
+        detail: content.includes('MAX_RETRIES = 5') ? 'found and changed' : 'value unchanged',
+      };
+    },
+  },
+  // ---- skill A/B variants: identical setup/check to their baselines, the
+  // only difference is the prompt (shipped-skill expansion vs plain ask).
+  {
+    id: 'skill-test-fix',
+    kind: 'multistep',
+    setup: (dir) => write(dir, { 'src/calc.js': CALC_BUGGY, 'test.js': CALC_TEST }),
+    turns: [skillPrompt('fix-failing-test', 'the test command is: node test.js')],
+    check: (dir, answer) => {
+      const r = runNode(dir, 'test.js');
+      const verified = /pass/i.test(answer);
+      return {
+        success: r.ok && verified,
+        detail: r.ok ? (verified ? 'fixed and reported' : 'fixed but report unclear') : 'tests still fail',
+      };
+    },
+  },
+  {
+    id: 'skill-find-change',
+    kind: 'multistep',
+    setup: (dir) =>
+      write(dir, {
+        'src/a.js': `const x = 1;\nmodule.exports = x;\n`,
+        'src/deep/limits.js': `const MAX_RETRIES = 3;\nmodule.exports = { MAX_RETRIES };\n`,
+        'src/b.js': `const y = 2;\nmodule.exports = y;\n`,
+      }),
+    turns: [skillPrompt('find-and-change', 'change MAX_RETRIES from 3 to 5')],
     check: (dir) => {
       const content = read(dir, 'src/deep/limits.js');
       return {

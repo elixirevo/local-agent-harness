@@ -159,6 +159,11 @@ Task input: $ARGUMENTS
 - 이름은 kebab-case, 빌트인 명령과 충돌하면 로드가 거부된다.
 - **주의**: 스킬은 설계상 프롬프트 주입이다. 서드파티 스킬은 코드처럼 리뷰 후 설치할 것.
 
+**스타터 스킬**: 저장소의 [skills/](skills/) 디렉터리에 예시 2종(`fix-failing-test`,
+`find-and-change`)이 동봉돼 있다. 쓰려면 프로젝트의 `.harness/skills/`나 전역
+`~/.harness/skills/`로 복사하면 된다. 평가 하네스의 `skill-*` 시나리오가 이 파일들을 그대로
+확장해 스킬 유/무 성공률을 A/B 측정한다.
+
 ## /remember — 세션 메모리
 
 `/remember <note>`는 프로젝트 AGENTS.md의 관리 섹션(`## Harness notes`)에 날짜 붙은 노트를

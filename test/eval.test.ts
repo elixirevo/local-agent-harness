@@ -54,6 +54,15 @@ describe('scenario suite', () => {
     }
   });
 
+  it('builds skill A/B variants from the shipped skill files', () => {
+    const testFix = SCENARIOS.find((s) => s.id === 'skill-test-fix')!;
+    expect(testFix.turns[0]).toContain('Follow this workflow step by step:');
+    expect(testFix.turns[0]).toContain('node test.js'); // $ARGUMENTS substituted
+    const findChange = SCENARIOS.find((s) => s.id === 'skill-find-change')!;
+    expect(findChange.turns[0]).toContain('DEFINED (not just used)');
+    expect(findChange.turns[0]).toContain('change MAX_RETRIES from 3 to 5');
+  });
+
   it('filters by id and by heaviness', () => {
     expect(selectScenarios(undefined, false).every((s) => !s.heavy)).toBe(true);
     expect(selectScenarios(undefined, true).length).toBeGreaterThan(selectScenarios(undefined, false).length);
