@@ -453,7 +453,7 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
     }
     case '/mcp': {
       if (!session.mcp || session.mcp.length === 0) {
-        l(dim('(no MCP servers configured — add mcpServers to harness.config.json)'));
+        l(dim('(no MCP servers configured — add mcpServers or "webFetch": "mcp" to harness.config.json)'));
         return false;
       }
       for (const c of session.mcp) {

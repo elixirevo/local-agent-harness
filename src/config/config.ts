@@ -11,6 +11,17 @@ export interface ProviderConfig {
   keepAlive?: string;
 }
 
+/**
+ * How the model reaches the web:
+ * - 'off'    — no web access (default)
+ * - 'native' — built-in WebFetch tool (GET only, public hosts, HTML→text)
+ * - 'mcp'    — an MCP fetch server; a default (uvx mcp-server-fetch) is
+ *              injected unless mcpServers already defines "fetch"
+ */
+export type WebFetchMode = 'off' | 'native' | 'mcp';
+
+export const WEB_FETCH_MODES: WebFetchMode[] = ['off', 'native', 'mcp'];
+
 export interface HarnessConfig {
   defaultProvider: string;
   defaultModel?: string;
@@ -30,6 +41,8 @@ export interface HarnessConfig {
     exploreModel?: string;
     maxSteps?: number;
   };
+  /** Web access for the model (see WebFetchMode). CLI: --web <mode>. */
+  webFetch: WebFetchMode;
   /** MCP servers to connect over stdio; their tools register as mcp__name__tool. */
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   /** Profile overrides keyed by exact model id or family name. */
@@ -58,6 +71,7 @@ const DEFAULTS: HarnessConfig = {
   maxSteps: 20,
   saveSessions: true,
   compaction: DEFAULT_COMPACTION,
+  webFetch: 'off',
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -83,7 +97,22 @@ export function loadConfig(cwd: string = process.cwd()): HarnessConfig {
       `defaultProvider "${merged.defaultProvider}" is not defined in providers (${Object.keys(merged.providers).join(', ')})`,
     );
   }
+  if (!WEB_FETCH_MODES.includes(merged.webFetch)) {
+    throw new Error(`invalid webFetch "${merged.webFetch}" — use one of: ${WEB_FETCH_MODES.join(', ')}`);
+  }
   return merged;
+}
+
+/**
+ * MCP servers to actually connect: in webFetch 'mcp' mode a default fetch
+ * server rides along unless the user already configured one named "fetch".
+ */
+export function effectiveMcpServers(config: HarnessConfig): NonNullable<HarnessConfig['mcpServers']> {
+  const servers = { ...(config.mcpServers ?? {}) };
+  if (config.webFetch === 'mcp' && !servers.fetch) {
+    servers.fetch = { command: 'uvx', args: ['mcp-server-fetch'] };
+  }
+  return servers;
 }
 
 export function effectiveContextLength(profile: ResolvedProfile, config: HarnessConfig): number {

@@ -85,7 +85,8 @@ guided decoding은 없어 압축 재시도는 일반 재요청으로 폴백.
 
 ## 도구와 권한 모드
 
-도구는 Read / Write / Edit / Glob / Grep / Bash 6종. 프롬프트로 가르치는 규칙은 코드로도
+도구는 Read / Write / Edit / Glob / Grep / Bash 6종(웹 접근을 켜면 WebFetch 추가 — 아래
+"웹 접근" 참조). 프롬프트로 가르치는 규칙은 코드로도
 강제된다: Edit/Write는 선행 Read 필수, 읽은 뒤 파일이 외부에서 바뀌면 재읽기를 요구하고,
 동일 호출 반복(실패·거부된 호출의 재시도 포함)은 루프 가드가 차단한다(3회 반복 시 턴 강제 종료).
 Edit는 소형 모델의 대표 실수(라인 번호 프리픽스 포함, 들여쓰기 불일치)를 복구 사다리로 살려낸다.
@@ -126,6 +127,38 @@ Phase 1에서 네이티브 도구 호출에 실패했던 llama3.2(3B)가 이 프
 리마인더로 주입하고, 코드로도 강제한다: 모든 변이가 거부되며 **유일한 예외는 계획 파일**
 (`.harness/plan.md`)의 Write/Edit다. 읽기 도구와 read 분류 Bash(git status 등)로 탐색하며
 계획을 다듬은 뒤, `/plan`으로 해제하면 실행 허용 리마인더가 주입된다.
+
+## 웹 접근 (webFetch)
+
+기본은 **차단**(`off`)이다. config의 `webFetch` 또는 CLI `--web` 플래그로 두 방식 중 하나를 켠다:
+
+```json
+{ "webFetch": "native" }
+```
+
+| 모드 | 동작 |
+|---|---|
+| `off` | 웹 접근 없음 (기본) |
+| `native` | 내장 **WebFetch** 도구 등록 — 의존성 없음, 바로 동작 |
+| `mcp` | MCP fetch 서버 연결 — `mcpServers`에 `fetch`가 없으면 `uvx mcp-server-fetch`를 자동 주입 |
+
+`native` 모드의 WebFetch는 GET 전용이며 HTML을 플레인 텍스트로 변환해 돌려준다(스크립트·스타일
+제거, 30k 절단). 안전장치가 코드로 강제된다:
+
+- **공개 호스트만**: 루프백·사설 대역·링크로컬·CGNAT·멀티캐스트 주소는 IP 리터럴이든 DNS 해석
+  결과든 모두 차단 — 모델이 localhost의 프로바이더 서버나 클라우드 메타데이터(169.254.169.254)를
+  찌를 수 없다.
+- **리다이렉트 재검증**: 최대 5회, 매 홉마다 대상 URL을 다시 검사 — 공개 페이지가 사설 주소로
+  튕기는 우회를 막는다.
+- http/https만, 자격증명 포함 URL 거부, 바이너리 content-type 거부, 응답 2MB 상한, 타임아웃
+  기본 30초(최대 120초).
+
+읽기 도구로 취급되어 `ask` 모드에서도 확인 없이 실행된다(readonly 모드에도 노출).
+
+`mcp` 모드는 [uv](https://docs.astral.sh/uv/)가 필요하고(`brew install uv`), 도구는
+`mcp__fetch__fetch`로 등록된다. 변환 품질(마크다운)이 필요하거나 이미 MCP 생태계를 쓰고 있다면
+이쪽을, 의존성 없이 가볍게 쓰려면 `native`를 선택. 웹 **검색**까지 원하면 검색 MCP 서버를
+`mcpServers`에 직접 추가하면 된다(아래 참조).
 
 ## MCP 서버 연결
 
@@ -275,6 +308,7 @@ config `saveSessions: false`). 복원 경로 세 가지:
   "defaultProvider": "ollama",
   "defaultModel": "qwen3:8b",
   "contextLength": 32768,
+  "webFetch": "off",
   "providers": {
     "ollama": { "type": "ollama", "baseUrl": "http://localhost:11434", "keepAlive": "10m" }
   },

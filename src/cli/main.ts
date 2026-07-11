@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { createAgentTool } from '../agents/agentTool.js';
 import { ReminderQueue } from '../context/reminders.js';
 import { startupContext } from '../context/startup.js';
-import { effectiveContextLength, loadConfig } from '../config/config.js';
+import { effectiveContextLength, effectiveMcpServers, loadConfig, WEB_FETCH_MODES, type WebFetchMode } from '../config/config.js';
 import { resolveProfile, type PromptTier } from '../models/profile.js';
 import { closeMcpConnections, connectMcpServers, type McpConnection } from '../mcp/index.js';
 import { PermissionGate, PERMISSION_MODES, type PermissionMode } from '../permissions/gate.js';
@@ -17,6 +17,7 @@ import type { ChatMessage } from '../providers/types.js';
 import { loadSession, newSessionId, SESSIONS_DIR, SessionStore } from '../session/store.js';
 import { loadSkills } from '../skills/loader.js';
 import { defaultRegistry } from '../tools/registry.js';
+import { webFetchTool } from '../tools/webfetch.js';
 import { COMMANDS, friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
 
 const VERSION = '0.1.0';
@@ -49,6 +50,10 @@ Options:
       --base-url <url>         override the provider's base URL
       --ctx <n>                context length (overrides the profile/config cap)
       --system <text>          override the system prompt
+      --web <mode>             off | native | mcp — web access for the model
+                               (default: config.webFetch, else off)
+                               native: built-in WebFetch tool (GET, public hosts)
+                               mcp: connect an MCP fetch server (uvx mcp-server-fetch)
       --no-think               disable thinking on models that support toggling it
   -h, --help                   show help
   -v, --version                show version
@@ -77,6 +82,7 @@ async function main(): Promise<void> {
       'base-url': { type: 'string' },
       ctx: { type: 'string' },
       system: { type: 'string' },
+      web: { type: 'string' },
       'no-think': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -105,6 +111,13 @@ async function main(): Promise<void> {
   const mode = (values['permission-mode'] ?? config.permissionMode) as PermissionMode;
   if (!PERMISSION_MODES.includes(mode)) {
     die(`invalid --permission-mode "${mode}" — use one of: ${PERMISSION_MODES.join(', ')}`);
+  }
+
+  if (values.web !== undefined) {
+    if (!WEB_FETCH_MODES.includes(values.web as WebFetchMode)) {
+      die(`invalid --web "${values.web}" — use one of: ${WEB_FETCH_MODES.join(', ')}`);
+    }
+    config.webFetch = values.web as WebFetchMode;
   }
 
   let resumed = values.resume !== undefined ? tryLoad(cwd, values.resume) : undefined;
@@ -158,6 +171,7 @@ async function main(): Promise<void> {
   }
 
   const registry = defaultRegistry();
+  if (config.webFetch === 'native') registry.register(webFetchTool);
   const reminders = new ReminderQueue();
 
   // Every tool must be registered BEFORE the system prompt is built — the
@@ -172,8 +186,9 @@ async function main(): Promise<void> {
     })),
   );
   let mcp: McpConnection[] = [];
-  if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
-    mcp = await connectMcpServers(config.mcpServers, registry);
+  const mcpServers = effectiveMcpServers(config);
+  if (Object.keys(mcpServers).length > 0) {
+    mcp = await connectMcpServers(mcpServers, registry);
     for (const c of mcp) {
       if (c.error) console.error(`warning: MCP server "${c.client.name}": ${c.error}`);
     }
