@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../src/providers/types.js';
-import { loadSession, newSessionId, SessionStore } from '../src/session/store.js';
+import { listSessions, loadSession, newSessionId, SessionStore } from '../src/session/store.js';
 import { tmpCtx } from './toolHelpers.js';
 
 describe('SessionStore', () => {
@@ -78,5 +78,35 @@ describe('SessionStore', () => {
     // post-compaction turns keep appending normally
     store.append([...rebuilt, { role: 'assistant', content: 'next answer' }]);
     expect(loadSession(dir, meta.id).messages).toHaveLength(3);
+  });
+});
+
+describe('listSessions', () => {
+  const msgs = (n: number): ChatMessage[] =>
+    Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `m${i}` }) as ChatMessage);
+
+  it('returns saved sessions newest first with meta and message counts', () => {
+    const { dir } = tmpCtx();
+    expect(listSessions(dir)).toEqual([]); // no directory yet
+
+    const a = new SessionStore({ id: '20260101-000000-aaaa', createdAt: 't1', provider: 'ollama', model: 'm1', cwd: dir });
+    a.append(msgs(2));
+    const b = new SessionStore({ id: '20260102-000000-bbbb', createdAt: 't2', provider: 'ollama', model: 'm2', cwd: dir });
+    b.append(msgs(5));
+
+    const list = listSessions(dir);
+    expect(list.map((s) => s.id)).toEqual(['20260102-000000-bbbb', '20260101-000000-aaaa']);
+    expect(list[0].messages).toBe(5);
+    expect(list[0].model).toBe('m2');
+    expect(list[1].file.endsWith('20260101-000000-aaaa.jsonl')).toBe(true);
+  });
+
+  it('skips unreadable files instead of failing the listing', () => {
+    const { dir } = tmpCtx();
+    const good = new SessionStore({ id: '20260103-000000-good', createdAt: 't', provider: 'p', model: 'm', cwd: dir });
+    good.append(msgs(1));
+    fs.writeFileSync(path.join(dir, '.harness/sessions', 'broken.jsonl'), 'not json\n', 'utf8');
+    const list = listSessions(dir);
+    expect(list.map((s) => s.id)).toEqual(['20260103-000000-good']);
   });
 });

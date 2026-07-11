@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { charWidth, displayWidth, truncateAnsi } from '../src/cli/ansi.js';
-import { computeInputView, filterCommands, HintMenu, InputLine, type SlashCommand } from '../src/cli/editor.js';
+import {
+  computeInputView,
+  filterCommands,
+  HintMenu,
+  InputLine,
+  renderMenuRows,
+  type SlashCommand,
+} from '../src/cli/editor.js';
 
 describe('InputLine', () => {
   it('inserts, moves the cursor, and backspaces', () => {
@@ -195,6 +202,54 @@ describe('InputLine.replace (hint-menu completion)', () => {
     l.replace('/model');
     expect(l.value).toBe('/model');
     expect(l.cursorPos).toBe('/model'.length);
+  });
+});
+
+describe('renderMenuRows (vertical menu)', () => {
+  const items: SlashCommand[] = Array.from({ length: 10 }, (_, i) => ({
+    name: `/cmd${i}`,
+    desc: `desc ${i}`,
+  }));
+
+  it('renders one row per item with the description on the right', () => {
+    const rows = renderMenuRows(items.slice(0, 3), 0, 6, 80);
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toContain('/cmd1');
+    expect(rows[1]).toContain('desc 1');
+    expect(rows[1].indexOf('/cmd1')).toBeLessThan(rows[1].indexOf('desc 1'));
+  });
+
+  it('marks the selected row and shows the enter label', () => {
+    const rows = renderMenuRows(items.slice(0, 3), 1, 6, 80, 'fill');
+    expect(rows[1]).toContain('▸');
+    expect(rows[1]).toContain('⏎ fill');
+    expect(rows[0]).not.toContain('▸');
+  });
+
+  it('slides the window to keep the selection visible and shows position', () => {
+    const rows = renderMenuRows(items, 8, 6, 80);
+    expect(rows).toHaveLength(6);
+    const joined = rows.join('\n');
+    expect(joined).toContain('/cmd8');
+    expect(joined).not.toContain('/cmd0');
+    expect(joined).toContain('9/10');
+  });
+
+  it('pads names so descriptions align by display width', () => {
+    const rows = renderMenuRows(
+      [
+        { name: '/a', desc: 'first-desc' },
+        { name: '/longer', desc: 'second-desc' },
+      ],
+      0,
+      6,
+      80,
+    );
+    expect(rows[0].indexOf('first-desc')).toBe(rows[1].indexOf('second-desc'));
+  });
+
+  it('returns nothing for an empty list', () => {
+    expect(renderMenuRows([], 0, 6, 80)).toEqual([]);
   });
 });
 

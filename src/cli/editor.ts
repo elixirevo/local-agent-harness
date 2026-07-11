@@ -1,4 +1,4 @@
-import { displayWidth } from './ansi.js';
+import { dim, displayWidth, inverse, truncateAnsi } from './ansi.js';
 
 export interface InputView {
   /** Windowed value text (no prompt, no color, no … marker). */
@@ -222,4 +222,30 @@ export class HintMenu {
   prev(): void {
     if (this.items.length > 0) this.idx = (this.idx - 1 + this.items.length) % this.items.length;
   }
+}
+
+/**
+ * Render menu items as vertical rows — name column left, description right,
+ * selected row highlighted. Slides a window of at most `maxRows` so the
+ * selection stays visible; the selected row carries a position marker when
+ * items overflow the window. Pure: the TUI paints the returned strings 1:1.
+ */
+export function renderMenuRows(
+  items: SlashCommand[],
+  selected: number,
+  maxRows: number,
+  cols: number,
+  enterLabel = 'select',
+): string[] {
+  const count = Math.min(items.length, maxRows);
+  if (count === 0) return [];
+  const start = Math.max(0, Math.min(selected - Math.floor(count / 2), items.length - count));
+  const win = items.slice(start, start + count);
+  const nameW = Math.max(...win.map((c) => displayWidth(c.name)));
+  return win.map((c, i) => {
+    const pad = ' '.repeat(nameW - displayWidth(c.name));
+    if (start + i !== selected) return truncateAnsi(`  ${c.name}${pad}  ${dim(c.desc)}`, cols);
+    const pos = items.length > count ? ` · ${selected + 1}/${items.length}` : '';
+    return truncateAnsi(`${inverse(`▸ ${c.name}${pad}`)}  ${c.desc}${dim(`  ⏎ ${enterLabel}${pos}`)}`, cols);
+  });
 }

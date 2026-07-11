@@ -10,7 +10,7 @@ import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../pr
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
 import { rememberNote } from '../session/memory.js';
-import type { SessionStore } from '../session/store.js';
+import { listSessions, loadSession, SessionStore } from '../session/store.js';
 import { expandSkill, type Skill } from '../skills/loader.js';
 import { bold, dim, green, red } from './ansi.js';
 import type { SlashCommand } from './editor.js';
@@ -48,6 +48,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: '/mcp', desc: 'list connected MCP servers' },
   { name: '/remember', desc: '<note> — save to AGENTS.md' },
   { name: '/session', desc: 'show where this session is saved' },
+  { name: '/resume', desc: 'pick a saved session to continue' },
   { name: '/context', desc: 'show the context budget' },
   { name: '/compact', desc: 'compact the conversation now' },
   { name: '/clear', desc: 'reset the conversation' },
@@ -228,6 +229,7 @@ function writeOnlyUi(): ReplUi {
     write: (s) => void process.stdout.write(s),
     readLine: async () => undefined,
     ask: async () => 'deny',
+    choose: async () => undefined,
     beginWait: (c) => spinner.arm(c),
     endWait: () => spinner.disarm(),
     onIdle: () => {},
@@ -359,6 +361,63 @@ function helpText(session: CliSession): string {
 }
 
 /** Returns true when the REPL should exit. */
+/**
+ * /resume [id] — swap the running conversation for a saved one. Without an
+ * id, offers the saved sessions as a menu (vertical selector in the TUI,
+ * numbered list in plain mode).
+ */
+async function resumeCommand(session: CliSession, ui: ReplUi, arg: string | undefined): Promise<void> {
+  const cwd = session.toolCtx.cwd;
+  const all = listSessions(cwd).filter((s) => s.file !== session.store?.file);
+  if (all.length === 0) {
+    ui.write(dim('no saved sessions to resume\n'));
+    return;
+  }
+  let id = arg;
+  if (!id) {
+    const items = all.map((s) => {
+      // Session ids embed local wall-clock time; createdAt is UTC ISO. Prefer
+      // the id so the listed time matches what the user's clock showed.
+      const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/.exec(s.id);
+      const when = m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : s.createdAt.slice(0, 16).replace('T', ' ');
+      return { name: s.id, desc: `${s.model} · ${s.messages} msgs · ${when}` };
+    });
+    const idx = await ui.choose('resume which session?', items);
+    if (idx === undefined) {
+      ui.write(dim('cancelled\n'));
+      return;
+    }
+    id = all[idx].id;
+  }
+  let loaded: ReturnType<typeof loadSession>;
+  try {
+    loaded = loadSession(cwd, id);
+  } catch (err) {
+    ui.write(red((err as Error).message) + '\n');
+    return;
+  }
+  if (loaded.messages[0]?.role !== 'system' && session.messages[0]?.role === 'system') {
+    loaded.messages.unshift(session.messages[0]);
+  }
+  session.messages = loaded.messages;
+  if (session.store) {
+    // Adopt the resumed transcript; future turns append to its file.
+    const store = new SessionStore(loaded.meta);
+    store.markSaved(loaded.messages.length);
+    session.store = store;
+  }
+  session.transcriptPath = loaded.file;
+  session.toolCtx.readFiles = new Map();
+  session.reminders.enqueue(
+    'This session was resumed from an earlier saved conversation. The filesystem may have changed since — Read files again before editing them.',
+  );
+  const turns = loaded.messages.filter((m) => m.role !== 'system').length;
+  ui.write(dim(`resumed ${loaded.meta.id} (${turns} messages)\n`));
+  if (loaded.meta.model !== session.model) {
+    ui.write(dim(`note: recorded with ${loaded.meta.model}; you are on ${session.model} (switch with /model)\n`));
+  }
+}
+
 async function handleCommand(session: CliSession, input: string, ui: ReplUi): Promise<boolean> {
   const [cmd, ...rest] = input.split(/\s+/);
   const arg = rest.join(' ');
@@ -419,6 +478,9 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
     }
     case '/session':
       l(session.store ? session.store.file : dim('(session saving is disabled)'));
+      return false;
+    case '/resume':
+      await resumeCommand(session, ui, arg || undefined);
       return false;
     case '/context': {
       const defs =

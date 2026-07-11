@@ -1,12 +1,13 @@
 import type { Approval } from '../permissions/gate.js';
-import { bold, cyan, dim, displayWidth, green, inverse, red, truncateAnsi } from './ansi.js';
-import { computeInputView, HintMenu, InputLine, type SlashCommand } from './editor.js';
+import { bold, cyan, dim, displayWidth, green, red, truncateAnsi } from './ansi.js';
+import { computeInputView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
 import type { ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
 const WAIT_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const PROMPT = '❯ ';
 const MIN_ROWS = 4;
+const MAX_MENU_ROWS = 6;
 
 export function canUseRawTui(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY) && (process.stdout.rows ?? 0) >= MIN_ROWS;
@@ -33,6 +34,14 @@ export class RawTui implements ReplUi {
   private readonly input = new InputLine();
   private readonly menu = new HintMenu();
   private readonly queue: string[] = [];
+  /** Last row of the scroll region; the bar area starts right below it. */
+  private regionTop: number;
+  private choosing: {
+    title: string;
+    items: SlashCommand[];
+    idx: number;
+    resolve: (i: number | undefined) => void;
+  } | null = null;
   private lineResolver: ((v: string | undefined) => void) | null = null;
   private askResolver: ((a: Approval) => void) | null = null;
   private askAllowAlways = false;
@@ -50,6 +59,7 @@ export class RawTui implements ReplUi {
   constructor(private readonly slashCommands: SlashCommand[]) {
     this.rows = this.out.rows ?? 24;
     this.cols = this.out.columns ?? 80;
+    this.regionTop = this.rows - 2;
     this.stdin.setRawMode?.(true);
     this.stdin.resume();
     this.stdin.setEncoding('utf8');
@@ -68,10 +78,30 @@ export class RawTui implements ReplUi {
   }
 
   private setupScreen(): void {
-    // Scroll region = rows 1..H-2; park the output cursor at its bottom.
-    this.out.write(`\x1b[1;${this.rows - 2}r`);
-    this.out.write(`\x1b[${this.rows - 2};1H\x1b7`);
+    // Scroll region = rows 1..regionTop; park the output cursor at its bottom.
+    this.out.write(`\x1b[1;${this.regionTop}r`);
+    this.out.write(`\x1b[${this.regionTop};1H\x1b7`);
     this.drawBar();
+  }
+
+  /**
+   * Move the scroll-region bottom while keeping the output anchor on its
+   * line. Shrinking walks the anchor down k rows (scrolling the old region
+   * only as far as needed) and back up k — it lands on the same content line,
+   * now guaranteed to sit inside the smaller region. Growing just clears the
+   * rows that rejoin the region (they held stale bar content).
+   */
+  private moveRegionTop(newTop: number): string {
+    const cur = this.regionTop;
+    if (newTop === cur) return '';
+    this.regionTop = newTop;
+    if (newTop < cur) {
+      const k = cur - newTop;
+      return `\x1b8${'\n'.repeat(k)}\x1b[${k}A\x1b7\x1b[1;${newTop}r`;
+    }
+    let seq = `\x1b[1;${newTop}r`;
+    for (let r = cur + 1; r <= newTop; r++) seq += `\x1b[${r};1H\x1b[2K`;
+    return seq;
   }
 
   write(s: string): void {
@@ -99,6 +129,23 @@ export class RawTui implements ReplUi {
     return new Promise((resolve) => {
       this.askResolver = resolve;
       this.askAllowAlways = allowAlways;
+      this.drawBar();
+    });
+  }
+
+  choose(title: string, items: SlashCommand[]): Promise<number | undefined> {
+    if (this.closed || items.length === 0) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      this.choosing = {
+        title,
+        items,
+        idx: 0,
+        resolve: (v) => {
+          this.choosing = null;
+          this.drawBar();
+          resolve(v);
+        },
+      };
       this.drawBar();
     });
   }
@@ -145,6 +192,7 @@ export class RawTui implements ReplUi {
     this.restoreTerminal();
     this.out.write('\n');
     this.stdin.pause();
+    this.choosing?.resolve(undefined);
     this.lineResolver?.(undefined);
     this.lineResolver = null;
   }
@@ -154,6 +202,10 @@ export class RawTui implements ReplUi {
   private handleData(data: string): void {
     if (this.askResolver) {
       this.handleAskKey(data);
+      return;
+    }
+    if (this.choosing) {
+      this.handleChooseKey(data);
       return;
     }
     let i = 0;
@@ -213,6 +265,22 @@ export class RawTui implements ReplUi {
     // Unknown escape: consume the CSI sequence up to its final letter, or just ESC.
     const m = s.match(/^\x1b\[[0-9;]*[A-Za-z~]/);
     return m ? m[0].length : 1;
+  }
+
+  private handleChooseKey(data: string): void {
+    const c = this.choosing!;
+    if (data.startsWith('\x1b[A') || data.startsWith('\x1b[Z')) {
+      c.idx = (c.idx - 1 + c.items.length) % c.items.length;
+    } else if (data.startsWith('\x1b[B') || data.startsWith('\t')) {
+      c.idx = (c.idx + 1) % c.items.length;
+    } else if (data.startsWith('\r') || data.startsWith('\n')) {
+      c.resolve(c.idx);
+      return;
+    } else if (data === '\x1b' || data.startsWith('\x03') || data.toLowerCase().startsWith('q')) {
+      c.resolve(undefined);
+      return;
+    }
+    this.drawBar();
   }
 
   private handleAskKey(data: string): void {
@@ -276,12 +344,36 @@ export class RawTui implements ReplUi {
 
   private drawBar(): void {
     if (this.closed) return;
-    const inputRow = this.rows - 1;
-    const hintRow = this.rows;
-    const { text, cursorCol } = this.renderInput();
+    this.syncMenu();
+    // The bar area is 1 input/title row plus either N vertical menu rows or
+    // the single hint row; the scroll region shrinks/grows to make room.
+    const menuItems = this.choosing ? this.choosing.items : this.askResolver ? [] : this.menu.matches;
+    const selIdx = this.choosing ? this.choosing.idx : this.menu.index;
+    const maxRows = Math.max(1, Math.min(MAX_MENU_ROWS, this.rows - 3));
+    const menuCount = Math.min(menuItems.length, maxRows);
     let out = '\x1b[?25l';
+    out += this.moveRegionTop(this.rows - 1 - Math.max(1, menuCount));
+    const inputRow = this.regionTop + 1;
+    const { text, cursorCol } = this.choosing
+      ? {
+          text: truncateAnsi(`${bold(this.choosing.title)} ${dim('· ↑↓ select · enter confirm · esc cancel')}`, this.cols),
+          cursorCol: 1,
+        }
+      : this.renderInput();
     out += `\x1b[${inputRow};1H\x1b[2K${text}`;
-    out += `\x1b[${hintRow};1H\x1b[2K${this.renderHint()}`;
+    if (menuCount > 0) {
+      const enterLabel = this.choosing
+        ? 'select'
+        : this.menu.selected && this.input.value === this.menu.selected.name
+          ? 'run'
+          : 'fill';
+      const lines = renderMenuRows(menuItems, selIdx, maxRows, this.cols, enterLabel);
+      lines.forEach((line, i) => {
+        out += `\x1b[${inputRow + 1 + i};1H\x1b[2K${line}`;
+      });
+    } else {
+      out += `\x1b[${this.rows};1H\x1b[2K${this.renderHint()}`;
+    }
     out += `\x1b[${inputRow};${cursorCol}H\x1b[?25h`;
     this.out.write(out);
   }
@@ -298,20 +390,6 @@ export class RawTui implements ReplUi {
     if (this.askResolver) {
       return dim(`press y / n${this.askAllowAlways ? ' / a (always allow this tool this session)' : ''}`);
     }
-    this.syncMenu();
-    if (this.menu.active) {
-      const items = this.menu.matches;
-      const sel = this.menu.index;
-      if (items.length === 1) {
-        return truncateAnsi(`${inverse(items[0].name)} ${dim(`— ${items[0].desc}`)}`, this.cols);
-      }
-      // Slide a 6-item window so the selection stays visible.
-      const start = Math.max(0, Math.min(sel - 2, items.length - 6));
-      const win = items.slice(start, start + 6);
-      const list = win.map((c, i) => (start + i === sel ? inverse(c.name) : dim(c.name))).join('  ');
-      const more = start + 6 < items.length ? dim(` +${items.length - start - 6}`) : '';
-      return truncateAnsi(`${list}${more}  ${dim('· ↑↓ select · enter fill')}`, this.cols);
-    }
     if (this.working) {
       const elapsed = ((Date.now() - this.waitStart) / 1000).toFixed(1);
       return dim(`${WAIT_FRAMES[this.frame]} working… ${elapsed}s   (ctrl+c to interrupt)`);
@@ -323,8 +401,11 @@ export class RawTui implements ReplUi {
     this.rows = this.out.rows ?? 24;
     this.cols = this.out.columns ?? 80;
     if (this.rows < MIN_ROWS) return;
-    this.out.write(`\x1b[1;${this.rows - 2}r`);
-    this.out.write(`\x1b[${this.rows - 2};1H\x1b7`);
+    // Reset to the default layout and re-park; drawBar re-shrinks for any
+    // open menu from this known-good state.
+    this.regionTop = this.rows - 2;
+    this.out.write(`\x1b[1;${this.regionTop}r`);
+    this.out.write(`\x1b[${this.regionTop};1H\x1b7`);
     this.drawBar();
   }
 }

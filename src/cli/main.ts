@@ -258,7 +258,8 @@ async function main(): Promise<void> {
     store,
     compaction: config.compaction,
     transcriptPath: store?.file,
-    onCompacted: (compacted) => store?.recordCompaction(compacted),
+    // Via `session` so /resume's store swap is picked up, not the closure-time store.
+    onCompacted: (compacted) => session.store?.recordCompaction(compacted),
     baseMode: mode,
     planMode,
     plain: values.plain === true,

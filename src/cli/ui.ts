@@ -1,6 +1,7 @@
 import * as readline from 'node:readline/promises';
 import type { Approval } from '../permissions/gate.js';
 import { bold, dim, useColor } from './ansi.js';
+import type { SlashCommand } from './editor.js';
 
 /**
  * The surface the REPL renders through. Two implementations: the plain
@@ -17,6 +18,8 @@ export interface ReplUi {
   readLine(prompt: string): Promise<string | undefined>;
   /** Approve a mutating call (y/n, or y/n/a when allowAlways). */
   ask(summary: string, allowAlways: boolean): Promise<Approval>;
+  /** Pick one item from a list; resolves to its index, or undefined if cancelled. */
+  choose(title: string, items: SlashCommand[]): Promise<number | undefined>;
   /** Show/hide a "working" indicator during silent gaps. */
   beginWait(canDraw: boolean): void;
   endWait(): void;
@@ -157,6 +160,15 @@ export class PlainUi implements ReplUi {
     if (answer === 'a' || answer === 'always') return allowAlways ? 'always' : 'once';
     if (answer === 'y' || answer === 'yes') return 'once';
     return 'deny';
+  }
+
+  async choose(title: string, items: SlashCommand[]): Promise<number | undefined> {
+    if (items.length === 0) return undefined;
+    this.write(`${bold(title)}\n`);
+    items.forEach((c, i) => this.write(`  ${i + 1}. ${c.name}  ${dim(c.desc)}\n`));
+    const answer = ((await this.reader.next('number (empty to cancel): ')) ?? '').trim();
+    const n = Number(answer);
+    return Number.isInteger(n) && n >= 1 && n <= items.length ? n - 1 : undefined;
   }
 
   beginWait(canDraw: boolean): void {

@@ -98,6 +98,37 @@ export function newSessionId(now: Date = new Date()): string {
   return `${stamp}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+export interface SessionSummary {
+  id: string;
+  createdAt: string;
+  provider: string;
+  model: string;
+  /** Message lines in the file (a rough size signal, not turn count). */
+  messages: number;
+  file: string;
+}
+
+/** Saved sessions in cwd, newest first (ids sort chronologically). */
+export function listSessions(cwd: string): SessionSummary[] {
+  const dir = path.join(cwd, SESSIONS_DIR);
+  if (!fs.existsSync(dir)) return [];
+  const out: SessionSummary[] = [];
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort().reverse();
+  for (const f of files) {
+    const file = path.join(dir, f);
+    try {
+      const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+      const meta = JSON.parse(lines[0]) as MetaLine;
+      if (meta.type !== 'meta') continue;
+      const messages = lines.filter((l) => l.startsWith('{"type":"message"')).length;
+      out.push({ id: meta.id, createdAt: meta.createdAt, provider: meta.provider, model: meta.model, messages, file });
+    } catch {
+      // unreadable or torn first line — not resumable, skip it
+    }
+  }
+  return out;
+}
+
 export function loadSession(cwd: string, idOrLast: string): { meta: SessionMeta; messages: ChatMessage[]; file: string } {
   const dir = path.join(cwd, SESSIONS_DIR);
   let file: string;
