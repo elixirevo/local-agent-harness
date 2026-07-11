@@ -33,6 +33,23 @@ npm start -- -P llamacpp                     # 프로바이더 지정
 REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/plan` `/mcp` `/remember <note>`
 `/context` `/compact` `/session` `/clear` `/exit`
 
+### 전역 설치 — 어디서든 `harness`
+
+저장소 밖 아무 프로젝트에서나 쓰려면 링크 한 번이면 된다(`npm link`가 `prepare` 스크립트로
+자동 빌드까지 수행):
+
+```bash
+git clone <repo> && cd agent-harness
+npm install
+npm link          # 빌드 후 전역 bin에 harness 심링크
+
+cd ~/some/other/project
+harness -m gemma4:e2b                        # REPL
+harness -p "테스트 실패 원인 고쳐줘" -M ask    # one-shot
+```
+
+해제는 `npm unlink -g agent-harness`.
+
 ### 터미널 UI
 
 대화형 터미널(TTY)에서는 입력창이 화면 **하단에 고정**되고 모델 출력은 그 위로 흐른다. 입력창
