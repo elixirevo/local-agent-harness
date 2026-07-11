@@ -9,7 +9,7 @@ const PROMPT = '❯ ';
 const MIN_ROWS = 10;
 const MAX_MENU_ROWS = 6;
 const MAX_INPUT_ROWS = 5;
-const PROMPT_CONT = '│ ';
+const PROMPT_CONT = '  ';
 
 export function canUseRawTui(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY) && (process.stdout.rows ?? 0) >= MIN_ROWS;
@@ -374,7 +374,7 @@ export class RawTui implements ReplUi {
       return;
     }
     const line = this.input.submit();
-    if (line.trim()) this.write(`${cyan(PROMPT)}${line.replace(/\n/g, `\n${dim('│ ')}`)}\n`);
+    if (line.trim()) this.write(`${cyan(PROMPT)}${line.replace(/\n/g, `\n${dim(PROMPT_CONT)}`)}\n`);
     if (this.lineResolver) {
       const resolve = this.lineResolver;
       this.lineResolver = null;
