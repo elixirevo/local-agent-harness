@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -13,7 +14,7 @@ import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
 import { planFilePath, planModeEnterReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { ChatMessage } from '../providers/types.js';
-import { loadSession, newSessionId, SessionStore } from '../session/store.js';
+import { loadSession, newSessionId, SESSIONS_DIR, SessionStore } from '../session/store.js';
 import { loadSkills } from '../skills/loader.js';
 import { defaultRegistry } from '../tools/registry.js';
 import { COMMANDS, friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
@@ -42,6 +43,7 @@ Options:
                                (default: native if the model profile supports it, else text)
       --tier <t>               minimal | standard | full — system prompt tier
                                (default: from the model profile)
+  -c, --continue               resume the most recent saved session in this directory
       --resume <id|last>       resume a saved session from .harness/sessions/
       --no-save                do not persist this session
       --base-url <url>         override the provider's base URL
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
       plain: { type: 'boolean' },
       protocol: { type: 'string' },
       tier: { type: 'string' },
+      continue: { type: 'boolean', short: 'c' },
       resume: { type: 'string' },
       'no-save': { type: 'boolean' },
       'base-url': { type: 'string' },
@@ -104,7 +107,14 @@ async function main(): Promise<void> {
     die(`invalid --permission-mode "${mode}" — use one of: ${PERMISSION_MODES.join(', ')}`);
   }
 
-  const resumed = values.resume !== undefined ? tryLoad(cwd, values.resume) : undefined;
+  let resumed = values.resume !== undefined ? tryLoad(cwd, values.resume) : undefined;
+  if (!resumed && values.continue) {
+    try {
+      resumed = loadSession(cwd, 'last');
+    } catch {
+      console.error('no saved sessions to continue — starting a new session');
+    }
+  }
 
   let model = values.model ?? resumed?.meta.model ?? config.defaultModel;
   if (!model) {
@@ -205,6 +215,16 @@ async function main(): Promise<void> {
     }
   }
 
+  let bannerNote: string | undefined;
+  if (resumed) {
+    const turns = resumed.messages.filter((m) => m.role !== 'system').length;
+    bannerNote = `resumed ${resumed.meta.id} (${turns} messages)`;
+  } else {
+    const dir = path.join(cwd, SESSIONS_DIR);
+    const saved = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).length : 0;
+    if (saved > 0) bannerNote = `tip: harness -c resumes your last session (${saved} saved)`;
+  }
+
   const planMode = values.plan === true;
   const planFile = planFilePath(cwd);
   if (planMode) reminders.enqueue(planModeEnterReminder(planFile));
@@ -245,6 +265,7 @@ async function main(): Promise<void> {
     sessionAllow,
     skills: skillsLoad.skills,
     mcp,
+    bannerNote,
   };
 
   try {

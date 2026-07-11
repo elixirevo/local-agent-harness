@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { charWidth, displayWidth } from '../src/cli/ansi.js';
-import { computeInputView, filterCommands, InputLine, type SlashCommand } from '../src/cli/editor.js';
+import { charWidth, displayWidth, truncateAnsi } from '../src/cli/ansi.js';
+import { computeInputView, filterCommands, HintMenu, InputLine, type SlashCommand } from '../src/cli/editor.js';
 
 describe('InputLine', () => {
   it('inserts, moves the cursor, and backspaces', () => {
@@ -134,5 +134,85 @@ describe('filterCommands', () => {
     expect(filterCommands(cmds, 'hello')).toEqual([]);
     expect(filterCommands(cmds, '/model qwen3')).toEqual([]); // space → argument typed
     expect(filterCommands(cmds, '/zzz')).toEqual([]);
+  });
+});
+
+describe('HintMenu (keyboard-selectable hint bar)', () => {
+  const cmds: SlashCommand[] = [
+    { name: '/model', desc: 'switch model' },
+    { name: '/models', desc: 'list models' },
+    { name: '/mcp', desc: 'servers' },
+    { name: '/help', desc: 'help' },
+  ];
+
+  it('is inactive without matches and selects the first match by default', () => {
+    const m = new HintMenu();
+    m.update(cmds, 'hello');
+    expect(m.active).toBe(false);
+    expect(m.selected).toBeUndefined();
+    m.update(cmds, '/m');
+    expect(m.active).toBe(true);
+    expect(m.selected?.name).toBe('/model');
+  });
+
+  it('cycles the selection with next/prev, wrapping at the ends', () => {
+    const m = new HintMenu();
+    m.update(cmds, '/m');
+    m.next();
+    expect(m.selected?.name).toBe('/models');
+    m.next();
+    m.next(); // wraps past /mcp
+    expect(m.selected?.name).toBe('/model');
+    m.prev(); // wraps back to the end
+    expect(m.selected?.name).toBe('/mcp');
+  });
+
+  it('keeps the selection while the filter is unchanged, resets when it changes', () => {
+    const m = new HintMenu();
+    m.update(cmds, '/m');
+    m.next();
+    m.update(cmds, '/m'); // redraw with same input
+    expect(m.selected?.name).toBe('/models');
+    m.update(cmds, '/mo'); // filter changed
+    expect(m.index).toBe(0);
+    expect(m.selected?.name).toBe('/model');
+  });
+
+  it('completing to the selected name keeps it selected (Enter-Enter submits)', () => {
+    const m = new HintMenu();
+    m.update(cmds, '/mo');
+    // Enter fills '/model'; the menu re-filters on the completed text.
+    m.update(cmds, '/model');
+    expect(m.selected?.name).toBe('/model'); // exact match stays first → submit works
+  });
+});
+
+describe('InputLine.replace (hint-menu completion)', () => {
+  it('replaces the buffer and puts the cursor at the end', () => {
+    const l = new InputLine();
+    l.insert('/mo');
+    l.left();
+    l.replace('/model');
+    expect(l.value).toBe('/model');
+    expect(l.cursorPos).toBe('/model'.length);
+  });
+});
+
+describe('truncateAnsi', () => {
+  it('returns short strings unchanged, escapes and all', () => {
+    const s = '\x1b[2mhi\x1b[0m';
+    expect(truncateAnsi(s, 10)).toBe(s);
+  });
+
+  it('truncates by display width, not char count (CJK)', () => {
+    const out = truncateAnsi('한글메뉴테스트', 8); // 7 chars but 14 columns
+    expect(out.endsWith('…')).toBe(true);
+    expect(displayWidth(out.replace(/\x1b\[[0-9;]*m/g, ''))).toBeLessThanOrEqual(8);
+  });
+
+  it('preserves escape sequences and closes color before the marker', () => {
+    const out = truncateAnsi('\x1b[7m/model\x1b[0m  \x1b[2m/models\x1b[0m', 10);
+    expect(out).toContain('\x1b[7m');
+    expect(out.endsWith('\x1b[0m…')).toBe(true);
   });
 });

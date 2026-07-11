@@ -116,6 +116,13 @@ export class InputLine {
     this.histIdx = null;
   }
 
+  /** Replace the whole line (hint-menu completion), cursor at the end. */
+  replace(text: string): void {
+    this.buffer = text;
+    this.cursor = text.length;
+    this.histIdx = null;
+  }
+
   /** Take the current line, push non-empty to history, reset. */
   submit(): string {
     const line = this.buffer;
@@ -170,4 +177,49 @@ export function filterCommands(commands: SlashCommand[], input: string): SlashCo
   if (!input.startsWith('/') || input.includes(' ')) return [];
   const q = input.toLowerCase();
   return commands.filter((c) => c.name.toLowerCase().startsWith(q));
+}
+
+/**
+ * Keyboard-navigable selection over the hint-bar matches. Pure state (no
+ * terminal I/O): the TUI calls update() with the current input, moves the
+ * selection with next()/prev(), and reads selected/index to render and to
+ * fill the input on Enter. The selection resets whenever the filter changes.
+ */
+export class HintMenu {
+  private items: SlashCommand[] = [];
+  private idx = 0;
+  private filterKey: string | null = null;
+
+  update(commands: SlashCommand[], input: string): void {
+    this.items = filterCommands(commands, input);
+    if (input !== this.filterKey) {
+      this.idx = 0;
+      this.filterKey = input;
+    }
+    if (this.idx >= this.items.length) this.idx = 0;
+  }
+
+  get active(): boolean {
+    return this.items.length > 0;
+  }
+
+  get matches(): SlashCommand[] {
+    return this.items;
+  }
+
+  get index(): number {
+    return this.idx;
+  }
+
+  get selected(): SlashCommand | undefined {
+    return this.items[this.idx];
+  }
+
+  next(): void {
+    if (this.items.length > 0) this.idx = (this.idx + 1) % this.items.length;
+  }
+
+  prev(): void {
+    if (this.items.length > 0) this.idx = (this.idx - 1 + this.items.length) % this.items.length;
+  }
 }

@@ -1,6 +1,6 @@
 import type { Approval } from '../permissions/gate.js';
-import { bold, cyan, dim, displayWidth, green, red } from './ansi.js';
-import { computeInputView, filterCommands, InputLine, type SlashCommand } from './editor.js';
+import { bold, cyan, dim, displayWidth, green, inverse, red, truncateAnsi } from './ansi.js';
+import { computeInputView, HintMenu, InputLine, type SlashCommand } from './editor.js';
 import type { ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
@@ -31,6 +31,7 @@ export class RawTui implements ReplUi {
   private rows: number;
   private cols: number;
   private readonly input = new InputLine();
+  private readonly menu = new HintMenu();
   private readonly queue: string[] = [];
   private lineResolver: ((v: string | undefined) => void) | null = null;
   private askResolver: ((a: Approval) => void) | null = null;
@@ -166,6 +167,9 @@ export class RawTui implements ReplUi {
       } else if (ch === '\x7f' || ch === '\b') {
         this.input.backspace();
         i++;
+      } else if (ch === '\t') {
+        this.menuMove('next');
+        i++;
       } else if (ch === '\x03') {
         this.interruptFn?.();
         i++;
@@ -198,8 +202,9 @@ export class RawTui implements ReplUi {
 
   /** Handle an escape sequence at the start of `s`; return bytes consumed. */
   private handleEscape(s: string): number {
-    if (s.startsWith('\x1b[A')) return this.input.historyPrev(), 3;
-    if (s.startsWith('\x1b[B')) return this.input.historyNext(), 3;
+    if (s.startsWith('\x1b[A')) return this.upDown('prev'), 3;
+    if (s.startsWith('\x1b[B')) return this.upDown('next'), 3;
+    if (s.startsWith('\x1b[Z')) return this.menuMove('prev'), 3; // shift+tab
     if (s.startsWith('\x1b[C')) return this.input.right(), 3;
     if (s.startsWith('\x1b[D')) return this.input.left(), 3;
     if (s.startsWith('\x1b[H') || s.startsWith('\x1b[1~')) return this.input.home(), s[2] === 'H' ? 3 : 4;
@@ -226,7 +231,36 @@ export class RawTui implements ReplUi {
     resolve(ans);
   }
 
+  /** Keep the hint menu in sync with the current input text. */
+  private syncMenu(): void {
+    this.menu.update(this.slashCommands, this.input.value);
+  }
+
+  /** ↑/↓: navigate the hint menu while it is open, history otherwise. */
+  private upDown(dir: 'prev' | 'next'): void {
+    this.syncMenu();
+    if (this.menu.active) {
+      dir === 'prev' ? this.menu.prev() : this.menu.next();
+    } else {
+      dir === 'prev' ? this.input.historyPrev() : this.input.historyNext();
+    }
+  }
+
+  /** Tab / shift+tab: cycle the menu selection; no-op when the menu is closed. */
+  private menuMove(dir: 'prev' | 'next'): void {
+    this.syncMenu();
+    if (this.menu.active) dir === 'prev' ? this.menu.prev() : this.menu.next();
+  }
+
   private submitLine(): void {
+    // With the hint menu open, Enter first completes the selection into the
+    // input; a second Enter (input now equals the selection) submits it.
+    this.syncMenu();
+    const selected = this.menu.selected;
+    if (this.menu.active && selected && this.input.value !== selected.name) {
+      this.input.replace(selected.name);
+      return;
+    }
     const line = this.input.submit();
     if (line.trim()) this.write(`${cyan(PROMPT)}${line}\n`);
     if (this.lineResolver) {
@@ -264,13 +298,19 @@ export class RawTui implements ReplUi {
     if (this.askResolver) {
       return dim(`press y / n${this.askAllowAlways ? ' / a (always allow this tool this session)' : ''}`);
     }
-    const matches = filterCommands(this.slashCommands, this.input.value);
-    if (matches.length > 0) {
-      const list = matches
-        .slice(0, 6)
-        .map((c) => (matches.length === 1 ? `${c.name} — ${c.desc}` : c.name))
-        .join('  ');
-      return truncate(dim(list), this.cols);
+    this.syncMenu();
+    if (this.menu.active) {
+      const items = this.menu.matches;
+      const sel = this.menu.index;
+      if (items.length === 1) {
+        return truncateAnsi(`${inverse(items[0].name)} ${dim(`— ${items[0].desc}`)}`, this.cols);
+      }
+      // Slide a 6-item window so the selection stays visible.
+      const start = Math.max(0, Math.min(sel - 2, items.length - 6));
+      const win = items.slice(start, start + 6);
+      const list = win.map((c, i) => (start + i === sel ? inverse(c.name) : dim(c.name))).join('  ');
+      const more = start + 6 < items.length ? dim(` +${items.length - start - 6}`) : '';
+      return truncateAnsi(`${list}${more}  ${dim('· ↑↓ select · enter fill')}`, this.cols);
     }
     if (this.working) {
       const elapsed = ((Date.now() - this.waitStart) / 1000).toFixed(1);
@@ -287,13 +327,4 @@ export class RawTui implements ReplUi {
     this.out.write(`\x1b[${this.rows - 2};1H\x1b7`);
     this.drawBar();
   }
-}
-
-/** Truncate a possibly-ANSI-colored string to fit `width` visible columns. */
-function truncate(s: string, width: number): string {
-  const visible = s.replace(/\x1b\[[0-9;]*m/g, '');
-  if (visible.length <= width) return s;
-  // Colored hints are a single dim(...) wrap; slice the inner text safely.
-  const inner = visible.slice(0, width - 1);
-  return dim(inner + '…');
 }

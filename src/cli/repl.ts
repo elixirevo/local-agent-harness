@@ -33,6 +33,8 @@ export interface CliSession extends AgentSession {
   /** Workflow files loaded from .harness/skills, invoked as /name. */
   skills: Skill[];
   mcp?: McpConnection[];
+  /** One-line startup note (resumed-session info or a resume tip). */
+  bannerNote?: string;
 }
 
 const PROMPT = '❯ ';
@@ -343,6 +345,7 @@ function printBanner(session: CliSession, ui: ReplUi): void {
   );
   l(dim(toolsLine(session)));
   l(dim('/help for commands'));
+  if (session.bannerNote) l(dim(session.bannerNote));
   l();
 }
 

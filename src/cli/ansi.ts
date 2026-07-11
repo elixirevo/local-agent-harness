@@ -7,6 +7,7 @@ export const bold = wrap('1');
 export const green = wrap('32');
 export const red = wrap('31');
 export const cyan = wrap('36');
+export const inverse = wrap('7');
 
 /** Visible length of a string, ignoring ANSI SGR escape sequences. */
 export function visibleLength(s: string): number {
@@ -55,4 +56,29 @@ export function displayWidth(s: string): number {
   let w = 0;
   for (const ch of s) w += charWidth(ch.codePointAt(0) ?? 0);
   return w;
+}
+
+/**
+ * Truncate a possibly-ANSI-colored string to `width` terminal columns,
+ * preserving escape sequences and closing any open color before the marker.
+ */
+export function truncateAnsi(s: string, width: number): string {
+  const visible = s.replace(/\x1b\[[0-9;]*m/g, '');
+  if (displayWidth(visible) <= width) return s;
+  const parts = s.split(/(\x1b\[[0-9;]*m)/);
+  let out = '';
+  let used = 0;
+  for (const part of parts) {
+    if (part.startsWith('\x1b[')) {
+      out += part;
+      continue;
+    }
+    for (const ch of part) {
+      const w = charWidth(ch.codePointAt(0) ?? 0);
+      if (used + w > width - 1) return `${out}\x1b[0m…`;
+      out += ch;
+      used += w;
+    }
+  }
+  return out;
 }
