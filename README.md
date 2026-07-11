@@ -155,6 +155,23 @@ Phase 1에서 네이티브 도구 호출에 실패했던 llama3.2(3B)가 이 프
 
 읽기 도구로 취급되어 `ask` 모드에서도 확인 없이 실행된다(readonly 모드에도 노출).
 
+WebFetch는 검색 엔진이 아니라 **URL을 가져오는 도구**지만, 소형 모델도 개방형 질문에 쓸 수
+있도록 도구 설명이 레시피를 가르친다: 검색은 JS 없이 동작하는
+`html.duckduckgo.com/html/?q=...`(결과 페이지에는 "스니펫만 보고 답하지 말고 결과 URL을
+이어서 열라"는 리마인더가 주입된다), 날씨는 `wttr.in/<도시>?format=3` 원스텝. 실측 예
+(gemma4:e2b 기준):
+
+```
+harness --web native
+❯ 오늘 서울 날씨 알려줘
+→ WebFetch https://wttr.in/Seoul?format=3&lang=ko
+오늘 서울 날씨는 🌤️ +27°C 입니다.
+
+❯ 현재 Node.js LTS 버전이 뭐야? 웹에서 확인해줘
+→ WebFetch https://nodejs.org/en/about/releases
+현재 v24와 v22가 LTS 상태입니다.
+```
+
 `mcp` 모드는 [uv](https://docs.astral.sh/uv/)가 필요하고(`brew install uv`), 도구는
 `mcp__fetch__fetch`로 등록된다. 변환 품질(마크다운)이 필요하거나 이미 MCP 생태계를 쓰고 있다면
 이쪽을, 의존성 없이 가볍게 쓰려면 `native`를 선택. 웹 **검색**까지 원하면 검색 MCP 서버를

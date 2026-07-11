@@ -9,6 +9,12 @@ import {
 } from '../src/tools/webfetch.js';
 import { byteStream, fetchMock } from './helpers.js';
 
+// The tool's default lookup must never hit real DNS in tests; explicit
+// lookupFn stubs below override this where a specific answer matters.
+vi.mock('node:dns/promises', () => ({
+  lookup: async () => [{ address: '93.184.216.34', family: 4 }],
+}));
+
 const publicLookup: LookupFn = async () => ['93.184.216.34'];
 const privateLookup: LookupFn = async () => ['127.0.0.1'];
 
@@ -199,5 +205,20 @@ describe('webFetchTool', () => {
     const r = await webFetchTool.call({ url: 'http://127.0.0.1/' }, { cwd: '/', readFiles: new Map() });
     expect(r.ok).toBe(false);
     expect(r.output).toContain('private/loopback');
+  });
+
+  it('appends a next-hop reminder to search-results pages only', async () => {
+    const page = () => new Response('results', { status: 200, headers: { 'content-type': 'text/html' } });
+    vi.stubGlobal('fetch', fetchMock(page).fn);
+    const search = await webFetchTool.call(
+      { url: 'https://html.duckduckgo.com/html/?q=seoul+weather' },
+      { cwd: '/', readFiles: new Map() },
+    );
+    expect(search.output).toContain('<system-reminder>');
+    expect(search.output).toContain('search RESULTS page');
+
+    vi.stubGlobal('fetch', fetchMock(page).fn);
+    const normal = await webFetchTool.call({ url: 'http://93.184.216.34/' }, { cwd: '/', readFiles: new Map() });
+    expect(normal.output).not.toContain('<system-reminder>');
   });
 });

@@ -229,14 +229,17 @@ export const webFetchTool: Tool = {
 
   description(tier: PromptTier): string {
     if (tier === 'minimal') {
-      return 'Fetch a public http(s) URL with GET and return its text. HTML is converted to plain text. Private/localhost addresses are blocked.';
+      return 'Fetch a public http(s) URL with GET and return its text. HTML is converted to plain text. To search the web, fetch https://html.duckduckgo.com/html/?q=<url-encoded query> and then fetch a result URL.';
     }
     return [
       'Fetches a public http(s) URL with a GET request and returns the response as text.',
       '- HTML pages are converted to plain text (scripts and styles stripped); JSON and other text types are returned as-is.',
+      '- To SEARCH the web (current events, facts you do not know), fetch https://html.duckduckgo.com/html/?q=<url-encoded query>. The results are only titles, URLs, and snippets — do NOT answer from them alone; pick the best result URL, fetch THAT page, and answer from its content.',
+      '- Weather shortcut: fetch https://wttr.in/<City>?format=3 for one-line current weather (append &lang=ko for Korean; use format=v2 for a forecast).',
+      '- JavaScript-only pages (google.com search, SPAs) return little or no text — prefer the DuckDuckGo endpoint above and static pages.',
       '- Only public hosts are reachable: private, loopback, and link-local addresses are blocked.',
       `- Redirects are followed (max ${MAX_REDIRECTS}); long responses are truncated to ${MAX_OUTPUT_CHARS} characters keeping the head and tail.`,
-      '- Use it to read documentation, APIs, or reference pages the task needs. Never put secrets or tokens in a URL.',
+      '- Never put secrets or tokens in a URL.',
       `- Default timeout ${DEFAULT_TIMEOUT_MS / 1000}s; pass timeout (ms) for slow pages, max ${MAX_TIMEOUT_MS / 1000}s.`,
     ].join('\n');
   },
@@ -259,13 +262,27 @@ export const webFetchTool: Tool = {
     const notes = [result.capped ? 'response hit the size cap and was cut off' : '', result.url !== raw ? `final URL: ${result.url}` : '']
       .filter(Boolean)
       .join('; ');
+    // Small models answer from search snippets and stop; nudge the next hop.
+    const searchNote = isSearchResultUrl(result.url)
+      ? '\n\n<system-reminder>This is a search RESULTS page — titles, URLs, and snippets only. Do not answer from it. Pick the most relevant result URL, call WebFetch on it, and answer from that page\'s content.</system-reminder>'
+      : '';
     return {
       ok: true, // non-2xx is information for the model, not a harness error
-      output: `HTTP ${result.status}${notes ? ` (${notes})` : ''}\n\n${body}`,
+      output: `HTTP ${result.status}${notes ? ` (${notes})` : ''}\n\n${body}${searchNote}`,
       display: `HTTP ${result.status} · ${result.contentType || 'text'} · ${(result.text.length / 1000).toFixed(1)}k chars`,
     };
   },
 };
+
+/** True for search-engine result pages (the fetch is a hop, not an answer). */
+function isSearchResultUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return /(^|\.)duckduckgo\.com$/.test(hostname);
+  } catch {
+    return false;
+  }
+}
 
 /** Keep head and tail, like Bash output truncation. */
 function truncateMiddle(s: string): string {
