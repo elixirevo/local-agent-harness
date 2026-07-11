@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { charWidth, displayWidth, truncateAnsi } from '../src/cli/ansi.js';
 import {
   computeInputView,
+  computeMultilineView,
   filterCommands,
   HintMenu,
   InputLine,
@@ -191,6 +192,67 @@ describe('HintMenu (keyboard-selectable hint bar)', () => {
     // Enter fills '/model'; the menu re-filters on the completed text.
     m.update(cmds, '/model');
     expect(m.selected?.name).toBe('/model'); // exact match stays first → submit works
+  });
+});
+
+describe('InputLine multiline editing', () => {
+  it('inserts newlines at the cursor and keeps editing across lines', () => {
+    const l = new InputLine();
+    l.insert('firstsecond');
+    for (let i = 0; i < 6; i++) l.left(); // cursor between first|second
+    l.insertNewline();
+    expect(l.value).toBe('first\nsecond');
+    expect(l.cursorPos).toBe(6); // start of 'second'
+  });
+
+  it('moves the cursor across lines with lineUp/lineDown, clamping the column', () => {
+    const l = new InputLine();
+    l.paste('long first line\nab\nthird');
+    l.end();
+    expect(l.lineUp()).toBe(true); // from 'third' end → 'ab' (clamped to len 2)
+    expect(l.value.slice(0, l.cursorPos).endsWith('ab')).toBe(true);
+    expect(l.lineUp()).toBe(true);
+    expect(l.lineUp()).toBe(false); // already on the first line
+    expect(l.lineDown()).toBe(true);
+    l.end();
+    expect(l.lineDown()).toBe(false); // already on the last line
+  });
+
+  it('paste keeps line breaks and normalizes CR/CRLF', () => {
+    const l = new InputLine();
+    l.paste('a\r\nb\rc');
+    expect(l.value).toBe('a\nb\nc');
+  });
+});
+
+describe('computeMultilineView', () => {
+  it('is a single row for single-line input', () => {
+    const v = computeMultilineView('hello', 5, 80, 2, 5);
+    expect(v.rows).toEqual(['hello']);
+    expect(v.cursorRow).toBe(0);
+    expect(v.cursorCol).toBe(2 + 5 + 1);
+  });
+
+  it('renders one row per line and places the cursor on its line', () => {
+    const v = computeMultilineView('one\ntwo\nthree', 'one\ntw'.length, 80, 2, 5);
+    expect(v.rows).toEqual(['one', 'two', 'three']);
+    expect(v.cursorRow).toBe(1);
+    expect(v.cursorCol).toBe(2 + 2 + 1); // after 'tw'
+  });
+
+  it('windows tall input around the cursor line', () => {
+    const value = ['l0', 'l1', 'l2', 'l3', 'l4', 'l5', 'l6'].join('\n');
+    const v = computeMultilineView(value, value.length, 80, 2, 3); // cursor on l6
+    expect(v.rows).toEqual(['l4', 'l5', 'l6']);
+    expect(v.startLine).toBe(4);
+    expect(v.cursorRow).toBe(2);
+  });
+
+  it('horizontally scrolls only the cursor line', () => {
+    const long = 'x'.repeat(50);
+    const v = computeMultilineView(`${long}\n${long}`, 50, 20, 2, 5); // cursor at end of line 0
+    expect(v.rows[0].startsWith('…')).toBe(true);
+    expect(v.rows[1].startsWith('…')).toBe(false); // non-cursor line shows its head
   });
 });
 

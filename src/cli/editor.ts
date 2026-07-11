@@ -45,6 +45,48 @@ export function computeInputView(value: string, cursor: number, cols: number, pr
   };
 }
 
+export interface MultilineInputView {
+  /** Visible text per input row (leading … when horizontally truncated). */
+  rows: string[];
+  /** Buffer line index of rows[0] (vertical window offset). */
+  startLine: number;
+  /** Index into `rows` of the cursor's row. */
+  cursorRow: number;
+  /** 1-based terminal column of the cursor, including the prompt. */
+  cursorCol: number;
+}
+
+/**
+ * Multiline variant of computeInputView: one visible row per buffer line,
+ * vertically windowed to `maxRows` around the cursor's line; the cursor's
+ * line also scrolls horizontally.
+ */
+export function computeMultilineView(
+  value: string,
+  cursor: number,
+  cols: number,
+  promptWidth: number,
+  maxRows: number,
+): MultilineInputView {
+  const lines = value.split('\n');
+  let line = 0;
+  let col = cursor;
+  while (line < lines.length - 1 && col > lines[line].length) {
+    col -= lines[line].length + 1;
+    line++;
+  }
+  const count = Math.min(lines.length, Math.max(1, maxRows));
+  const start = Math.max(0, Math.min(line - Math.floor(count / 2), lines.length - count));
+  let cursorCol = promptWidth + 1;
+  const rows = lines.slice(start, start + count).map((ln, i) => {
+    const isCursorLine = start + i === line;
+    const v = computeInputView(ln, isCursorLine ? col : 0, cols, promptWidth);
+    if (isCursorLine) cursorCol = v.cursorCol;
+    return (v.leftTrunc ? '…' : '') + v.visible;
+  });
+  return { rows, startLine: start, cursorRow: line - start, cursorCol };
+}
+
 /**
  * Pure line-editor state — no terminal I/O, so the raw-mode TUI's editing
  * logic is unit-testable. The TUI feeds it keys and renders `value`/`cursor`.
@@ -72,6 +114,50 @@ export class InputLine {
     if (!clean) return;
     this.buffer = this.buffer.slice(0, this.cursor) + clean + this.buffer.slice(this.cursor);
     this.cursor += clean.length;
+  }
+
+  /** Insert a line break at the cursor (shift+enter / backslash continuation). */
+  insertNewline(): void {
+    this.buffer = this.buffer.slice(0, this.cursor) + '\n' + this.buffer.slice(this.cursor);
+    this.cursor++;
+  }
+
+  /** Insert pasted text, keeping its line breaks (bracketed paste). */
+  paste(text: string): void {
+    const clean = [...text.replace(/\r\n?/g, '\n')].filter((ch) => ch >= ' ' || ch === '\t' || ch === '\n').join('');
+    if (!clean) return;
+    this.buffer = this.buffer.slice(0, this.cursor) + clean + this.buffer.slice(this.cursor);
+    this.cursor += clean.length;
+  }
+
+  /** Cursor's line index and column within the (possibly multiline) buffer. */
+  private lineCol(): { line: number; col: number; lines: string[] } {
+    const lines = this.buffer.split('\n');
+    let line = 0;
+    let col = this.cursor;
+    while (line < lines.length - 1 && col > lines[line].length) {
+      col -= lines[line].length + 1;
+      line++;
+    }
+    return { line, col, lines };
+  }
+
+  /** Move the cursor one line up; false when already on the first line. */
+  lineUp(): boolean {
+    const { line, col, lines } = this.lineCol();
+    if (line === 0) return false;
+    const target = Math.min(col, lines[line - 1].length);
+    this.cursor = lines.slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0) + target;
+    return true;
+  }
+
+  /** Move the cursor one line down; false when already on the last line. */
+  lineDown(): boolean {
+    const { line, col, lines } = this.lineCol();
+    if (line >= lines.length - 1) return false;
+    const target = Math.min(col, lines[line + 1].length);
+    this.cursor = lines.slice(0, line + 1).reduce((a, l) => a + l.length + 1, 0) + target;
+    return true;
   }
 
   backspace(): void {

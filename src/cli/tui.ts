@@ -1,13 +1,20 @@
 import type { Approval } from '../permissions/gate.js';
-import { bold, cyan, dim, displayWidth, green, red, truncateAnsi } from './ansi.js';
-import { computeInputView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
+import { bold, cyan, dim, displayWidth, green, red, truncateAnsi, useColor } from './ansi.js';
+import { computeMultilineView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
 import type { ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
 const WAIT_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const PROMPT = '❯ ';
-const MIN_ROWS = 4;
+const MIN_ROWS = 10;
 const MAX_MENU_ROWS = 6;
+const MAX_INPUT_ROWS = 5;
+// Input-area styling: fg-only color codes (no \x1b[0m) so the row background
+// set around them survives; \x1b[2K under an active bg paints the whole row (BCE).
+const INPUT_BG = useColor ? '\x1b[48;5;236m' : '';
+const INPUT_BG_OFF = useColor ? '\x1b[49m' : '';
+const PROMPT_FIRST = useColor ? '\x1b[36m❯ \x1b[39m' : PROMPT;
+const PROMPT_CONT = useColor ? '\x1b[2m│ \x1b[22m' : '│ ';
 
 export function canUseRawTui(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY) && (process.stdout.rows ?? 0) >= MIN_ROWS;
@@ -42,6 +49,8 @@ export class RawTui implements ReplUi {
     idx: number;
     resolve: (i: number | undefined) => void;
   } | null = null;
+  /** Accumulates a bracketed paste until its terminator arrives. */
+  private pasting: string | null = null;
   private lineResolver: ((v: string | undefined) => void) | null = null;
   private askResolver: ((a: Approval) => void) | null = null;
   private askAllowAlways = false;
@@ -59,7 +68,8 @@ export class RawTui implements ReplUi {
   constructor(private readonly slashCommands: SlashCommand[]) {
     this.rows = this.out.rows ?? 24;
     this.cols = this.out.columns ?? 80;
-    this.regionTop = this.rows - 2;
+    // Default bar: spacer + 1 input row + spacer + hint row.
+    this.regionTop = this.rows - 4;
     this.stdin.setRawMode?.(true);
     this.stdin.resume();
     this.stdin.setEncoding('utf8');
@@ -71,13 +81,16 @@ export class RawTui implements ReplUi {
     this.setupScreen();
   }
 
-  /** Idempotent terminal restore (scroll region, raw mode, cursor). */
+  /** Idempotent terminal restore (scroll region, raw mode, cursor, modes). */
   private restoreTerminal(): void {
     this.stdin.setRawMode?.(false);
-    this.out.write(`\x1b[r\x1b[${this.rows};1H\x1b[?25h`);
+    this.out.write(`\x1b[?2004l\x1b[>4;0m\x1b[r\x1b[${this.rows};1H\x1b[?25h`);
   }
 
   private setupScreen(): void {
+    // Bracketed paste (multiline pastes arrive as one tagged chunk) and
+    // xterm modifyOtherKeys level 1 (shift+enter becomes distinguishable).
+    this.out.write('\x1b[?2004h\x1b[>4;1m');
     // Scroll region = rows 1..regionTop; park the output cursor at its bottom.
     this.out.write(`\x1b[1;${this.regionTop}r`);
     this.out.write(`\x1b[${this.regionTop};1H\x1b7`);
@@ -208,11 +221,31 @@ export class RawTui implements ReplUi {
       this.handleChooseKey(data);
       return;
     }
+    if (this.pasting !== null) {
+      this.pasting += data;
+      const end = this.pasting.indexOf('\x1b[201~');
+      if (end === -1) return; // terminator may arrive in a later chunk
+      this.input.paste(this.pasting.slice(0, end));
+      const rest = this.pasting.slice(end + 6);
+      this.pasting = null;
+      if (rest) {
+        this.handleData(rest);
+        return;
+      }
+      this.drawBar();
+      return;
+    }
     let i = 0;
     while (i < data.length) {
       const ch = data[i];
       if (ch === '\x1b') {
-        i += this.handleEscape(data.slice(i));
+        const consumed = this.handleEscape(data.slice(i));
+        if (this.pasting !== null) {
+          // A paste just started; the rest of this chunk belongs to it.
+          this.handleData(data.slice(i + consumed));
+          return;
+        }
+        i += consumed;
       } else if (ch === '\r' || ch === '\n') {
         this.submitLine();
         i++;
@@ -254,6 +287,15 @@ export class RawTui implements ReplUi {
 
   /** Handle an escape sequence at the start of `s`; return bytes consumed. */
   private handleEscape(s: string): number {
+    // Line breaks: alt/option+enter (ESC CR), shift/ctrl+enter as CSI-u or
+    // xterm modifyOtherKeys encodings.
+    if (s.startsWith('\x1b\r') || s.startsWith('\x1b\n')) return this.input.insertNewline(), 2;
+    if (s.startsWith('\x1b[13;2u') || s.startsWith('\x1b[13;5u')) return this.input.insertNewline(), 7;
+    if (s.startsWith('\x1b[27;2;13~') || s.startsWith('\x1b[27;5;13~')) return this.input.insertNewline(), 10;
+    if (s.startsWith('\x1b[200~')) {
+      this.pasting = '';
+      return 6;
+    }
     if (s.startsWith('\x1b[A')) return this.upDown('prev'), 3;
     if (s.startsWith('\x1b[B')) return this.upDown('next'), 3;
     if (s.startsWith('\x1b[Z')) return this.menuMove('prev'), 3; // shift+tab
@@ -304,11 +346,13 @@ export class RawTui implements ReplUi {
     this.menu.update(this.slashCommands, this.input.value);
   }
 
-  /** ↑/↓: navigate the hint menu while it is open, history otherwise. */
+  /** ↑/↓: hint menu when open, then multiline cursor movement, then history. */
   private upDown(dir: 'prev' | 'next'): void {
     this.syncMenu();
     if (this.menu.active) {
       dir === 'prev' ? this.menu.prev() : this.menu.next();
+    } else if (dir === 'prev' ? this.input.lineUp() : this.input.lineDown()) {
+      // moved within a multiline buffer
     } else {
       dir === 'prev' ? this.input.historyPrev() : this.input.historyNext();
     }
@@ -329,8 +373,13 @@ export class RawTui implements ReplUi {
       this.input.replace(selected.name);
       return;
     }
+    // Universal line-break fallback: a trailing backslash continues the line.
+    if (this.input.value.endsWith('\\')) {
+      this.input.replace(this.input.value.slice(0, -1) + '\n');
+      return;
+    }
     const line = this.input.submit();
-    if (line.trim()) this.write(`${cyan(PROMPT)}${line}\n`);
+    if (line.trim()) this.write(`${cyan(PROMPT)}${line.replace(/\n/g, `\n${dim('│ ')}`)}\n`);
     if (this.lineResolver) {
       const resolve = this.lineResolver;
       this.lineResolver = null;
@@ -345,45 +394,62 @@ export class RawTui implements ReplUi {
   private drawBar(): void {
     if (this.closed) return;
     this.syncMenu();
-    // The bar area is 1 input/title row plus either N vertical menu rows or
-    // the single hint row; the scroll region shrinks/grows to make room.
+    // Bar layout, top to bottom: blank spacer · input rows (bg-tinted, one
+    // per buffer line) · blank spacer · N vertical menu rows or the hint row.
+    // The scroll region shrinks/grows to make room.
     const menuItems = this.choosing ? this.choosing.items : this.askResolver ? [] : this.menu.matches;
     const selIdx = this.choosing ? this.choosing.idx : this.menu.index;
-    const maxRows = Math.max(1, Math.min(MAX_MENU_ROWS, this.rows - 3));
-    const menuCount = Math.min(menuItems.length, maxRows);
+    const view = this.choosing
+      ? null
+      : computeMultilineView(
+          this.input.value,
+          this.input.cursorPos,
+          this.cols,
+          displayWidth(PROMPT),
+          Math.max(1, Math.min(MAX_INPUT_ROWS, this.rows - 8)),
+        );
+    const inputRows = view ? view.rows.length : 1;
+    const maxMenu = Math.max(1, Math.min(MAX_MENU_ROWS, this.rows - inputRows - 7));
+    const menuCount = Math.min(menuItems.length, maxMenu);
     let out = '\x1b[?25l';
-    out += this.moveRegionTop(this.rows - 1 - Math.max(1, menuCount));
-    const inputRow = this.regionTop + 1;
-    const { text, cursorCol } = this.choosing
-      ? {
-          text: truncateAnsi(`${bold(this.choosing.title)} ${dim('· ↑↓ select · enter confirm · esc cancel')}`, this.cols),
-          cursorCol: 1,
-        }
-      : this.renderInput();
-    out += `\x1b[${inputRow};1H\x1b[2K${text}`;
+    out += this.moveRegionTop(this.rows - (1 + inputRows + 1 + Math.max(1, menuCount)));
+    const spacerTop = this.regionTop + 1;
+    const inputTop = spacerTop + 1;
+    const spacerBottom = inputTop + inputRows;
+    const hintTop = spacerBottom + 1;
+    out += `\x1b[${spacerTop};1H\x1b[2K`;
+    let cursorRow = inputTop;
+    let cursorCol = 1;
+    if (this.choosing) {
+      const title = truncateAnsi(
+        `${bold(this.choosing.title)} ${dim('· ↑↓ select · enter confirm · esc cancel')}`,
+        this.cols,
+      );
+      out += `\x1b[${inputTop};1H\x1b[2K${title}`;
+    } else {
+      view!.rows.forEach((text, i) => {
+        const prefix = view!.startLine + i === 0 ? PROMPT_FIRST : PROMPT_CONT;
+        out += `\x1b[${inputTop + i};1H${INPUT_BG}\x1b[2K${prefix}${text}${INPUT_BG_OFF}`;
+      });
+      cursorRow = inputTop + view!.cursorRow;
+      cursorCol = view!.cursorCol;
+    }
+    out += `\x1b[${spacerBottom};1H\x1b[2K`;
     if (menuCount > 0) {
       const enterLabel = this.choosing
         ? 'select'
         : this.menu.selected && this.input.value === this.menu.selected.name
           ? 'run'
           : 'fill';
-      const lines = renderMenuRows(menuItems, selIdx, maxRows, this.cols, enterLabel);
+      const lines = renderMenuRows(menuItems, selIdx, maxMenu, this.cols, enterLabel);
       lines.forEach((line, i) => {
-        out += `\x1b[${inputRow + 1 + i};1H\x1b[2K${line}`;
+        out += `\x1b[${hintTop + i};1H\x1b[2K${line}`;
       });
     } else {
-      out += `\x1b[${this.rows};1H\x1b[2K${this.renderHint()}`;
+      out += `\x1b[${hintTop};1H\x1b[2K${this.renderHint()}`;
     }
-    out += `\x1b[${inputRow};${cursorCol}H\x1b[?25h`;
+    out += `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`;
     this.out.write(out);
-  }
-
-  private renderInput(): { text: string; cursorCol: number } {
-    // Work in terminal columns, not code points: CJK/Hangul take 2 columns,
-    // so char counts would misplace the cursor and let wide lines wrap onto
-    // the hint row (the overlap bug).
-    const view = computeInputView(this.input.value, this.input.cursorPos, this.cols, displayWidth(PROMPT));
-    return { text: cyan(PROMPT) + (view.leftTrunc ? dim('…') : '') + view.visible, cursorCol: view.cursorCol };
   }
 
   private renderHint(): string {
@@ -402,8 +468,8 @@ export class RawTui implements ReplUi {
     this.cols = this.out.columns ?? 80;
     if (this.rows < MIN_ROWS) return;
     // Reset to the default layout and re-park; drawBar re-shrinks for any
-    // open menu from this known-good state.
-    this.regionTop = this.rows - 2;
+    // open menu/multiline input from this known-good state.
+    this.regionTop = this.rows - 4;
     this.out.write(`\x1b[1;${this.regionTop}r`);
     this.out.write(`\x1b[${this.regionTop};1H\x1b7`);
     this.drawBar();
