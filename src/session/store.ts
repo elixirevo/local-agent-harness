@@ -105,7 +105,14 @@ export interface SessionSummary {
   model: string;
   /** Message lines in the file (a rough size signal, not turn count). */
   messages: number;
+  /** First line the user actually typed (reminder blocks stripped); '' if none. */
+  firstPrompt: string;
   file: string;
+}
+
+/** The user-typed text of a message, without injected <system-reminder> blocks. */
+function userText(content: string): string {
+  return content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
 }
 
 /** Saved sessions in cwd, newest first (ids sort chronologically). */
@@ -120,8 +127,22 @@ export function listSessions(cwd: string): SessionSummary[] {
       const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
       const meta = JSON.parse(lines[0]) as MetaLine;
       if (meta.type !== 'meta') continue;
-      const messages = lines.filter((l) => l.startsWith('{"type":"message"')).length;
-      out.push({ id: meta.id, createdAt: meta.createdAt, provider: meta.provider, model: meta.model, messages, file });
+      let messages = 0;
+      let firstPrompt = '';
+      for (const line of lines) {
+        if (!line.startsWith('{"type":"message"')) continue;
+        messages++;
+        if (firstPrompt) continue;
+        try {
+          const { message } = JSON.parse(line) as MessageLine;
+          if (message.role === 'user' && typeof message.content === 'string') {
+            firstPrompt = userText(message.content).split('\n')[0];
+          }
+        } catch {
+          // torn mid-file line — counted, but not usable as a preview
+        }
+      }
+      out.push({ id: meta.id, createdAt: meta.createdAt, provider: meta.provider, model: meta.model, messages, firstPrompt, file });
     } catch {
       // unreadable or torn first line — not resumable, skip it
     }

@@ -68,14 +68,17 @@ export function truncateAnsi(s: string, width: number): string {
   const parts = s.split(/(\x1b\[[0-9;]*m)/);
   let out = '';
   let used = 0;
+  let sawAnsi = false;
   for (const part of parts) {
     if (part.startsWith('\x1b[')) {
       out += part;
+      sawAnsi = true;
       continue;
     }
     for (const ch of part) {
       const w = charWidth(ch.codePointAt(0) ?? 0);
-      if (used + w > width - 1) return `${out}\x1b[0m…`;
+      // Close any open color before the marker; plain strings stay plain.
+      if (used + w > width - 1) return `${out}${sawAnsi ? '\x1b[0m' : ''}…`;
       out += ch;
       used += w;
     }

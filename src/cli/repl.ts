@@ -12,7 +12,7 @@ import type { Usage } from '../providers/types.js';
 import { rememberNote } from '../session/memory.js';
 import { listSessions, loadSession, SessionStore } from '../session/store.js';
 import { expandSkill, type Skill } from '../skills/loader.js';
-import { bold, dim, green, red } from './ansi.js';
+import { bold, dim, green, red, truncateAnsi } from './ansi.js';
 import type { SlashCommand } from './editor.js';
 import { canUseRawTui, RawTui } from './tui.js';
 import { PlainUi, Spinner, type ReplUi } from './ui.js';
@@ -380,7 +380,9 @@ async function resumeCommand(session: CliSession, ui: ReplUi, arg: string | unde
       // the id so the listed time matches what the user's clock showed.
       const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/.exec(s.id);
       const when = m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : s.createdAt.slice(0, 16).replace('T', ' ');
-      return { name: s.id, desc: `${s.model} · ${s.messages} msgs · ${when}` };
+      // Lead with what the session was about — the first typed prompt.
+      const preview = s.firstPrompt ? `"${truncateAnsi(s.firstPrompt, 44)}" · ` : '';
+      return { name: s.id, desc: `${preview}${s.model} · ${s.messages} msgs · ${when}` };
     });
     const idx = await ui.choose('resume which session?', items);
     if (idx === undefined) {

@@ -270,4 +270,10 @@ describe('truncateAnsi', () => {
     expect(out).toContain('\x1b[7m');
     expect(out.endsWith('\x1b[0m…')).toBe(true);
   });
+
+  it('keeps plain strings free of escape codes when truncating', () => {
+    const out = truncateAnsi('Remember this codeword: BANANA42', 10);
+    expect(out).toBe('Remember …');
+    expect(out).not.toContain('\x1b');
+  });
 });

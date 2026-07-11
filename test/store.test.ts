@@ -98,7 +98,34 @@ describe('listSessions', () => {
     expect(list.map((s) => s.id)).toEqual(['20260102-000000-bbbb', '20260101-000000-aaaa']);
     expect(list[0].messages).toBe(5);
     expect(list[0].model).toBe('m2');
+    expect(list[0].firstPrompt).toBe('m0'); // msgs() starts with a user message
     expect(list[1].file.endsWith('20260101-000000-aaaa.jsonl')).toBe(true);
+  });
+
+  it('extracts the first typed prompt, skipping reminder blocks and system messages', () => {
+    const { dir } = tmpCtx();
+    const store = new SessionStore({ id: '20260104-000000-prev', createdAt: 't', provider: 'p', model: 'm', cwd: dir });
+    store.append([
+      { role: 'system', content: 'you are an agent' },
+      {
+        role: 'user',
+        content: '<system-reminder>\ninjected startup context\n</system-reminder>\n\nFix the failing test\nin src/calc.js',
+      },
+      { role: 'assistant', content: 'ok' },
+    ] as ChatMessage[]);
+    const [s] = listSessions(dir);
+    expect(s.firstPrompt).toBe('Fix the failing test'); // stripped + first line only
+    expect(s.messages).toBe(3);
+  });
+
+  it('leaves firstPrompt empty when no user message has typed text', () => {
+    const { dir } = tmpCtx();
+    const store = new SessionStore({ id: '20260105-000000-none', createdAt: 't', provider: 'p', model: 'm', cwd: dir });
+    store.append([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: '<system-reminder>only injected context</system-reminder>' },
+    ] as ChatMessage[]);
+    expect(listSessions(dir)[0].firstPrompt).toBe('');
   });
 
   it('skips unreadable files instead of failing the listing', () => {
