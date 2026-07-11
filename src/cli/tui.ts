@@ -1,5 +1,5 @@
 import type { Approval } from '../permissions/gate.js';
-import { bold, cyan, dim, displayWidth, green, red, truncateAnsi, useColor } from './ansi.js';
+import { bold, cyan, dim, displayWidth, green, red, truncateAnsi } from './ansi.js';
 import { computeMultilineView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
 import type { ReplUi } from './ui.js';
 
@@ -9,12 +9,7 @@ const PROMPT = '❯ ';
 const MIN_ROWS = 10;
 const MAX_MENU_ROWS = 6;
 const MAX_INPUT_ROWS = 5;
-// Input-area styling: fg-only color codes (no \x1b[0m) so the row background
-// set around them survives; \x1b[2K under an active bg paints the whole row (BCE).
-const INPUT_BG = useColor ? '\x1b[48;5;236m' : '';
-const INPUT_BG_OFF = useColor ? '\x1b[49m' : '';
-const PROMPT_FIRST = useColor ? '\x1b[36m❯ \x1b[39m' : PROMPT;
-const PROMPT_CONT = useColor ? '\x1b[2m│ \x1b[22m' : '│ ';
+const PROMPT_CONT = '│ ';
 
 export function canUseRawTui(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY) && (process.stdout.rows ?? 0) >= MIN_ROWS;
@@ -394,9 +389,9 @@ export class RawTui implements ReplUi {
   private drawBar(): void {
     if (this.closed) return;
     this.syncMenu();
-    // Bar layout, top to bottom: blank spacer · input rows (bg-tinted, one
-    // per buffer line) · blank spacer · N vertical menu rows or the hint row.
-    // The scroll region shrinks/grows to make room.
+    // Bar layout, top to bottom: rule line · input rows (one per buffer
+    // line) · rule line · N vertical menu rows or the hint row. The scroll
+    // region shrinks/grows to make room.
     const menuItems = this.choosing ? this.choosing.items : this.askResolver ? [] : this.menu.matches;
     const selIdx = this.choosing ? this.choosing.idx : this.menu.index;
     const view = this.choosing
@@ -413,11 +408,12 @@ export class RawTui implements ReplUi {
     const menuCount = Math.min(menuItems.length, maxMenu);
     let out = '\x1b[?25l';
     out += this.moveRegionTop(this.rows - (1 + inputRows + 1 + Math.max(1, menuCount)));
-    const spacerTop = this.regionTop + 1;
-    const inputTop = spacerTop + 1;
-    const spacerBottom = inputTop + inputRows;
-    const hintTop = spacerBottom + 1;
-    out += `\x1b[${spacerTop};1H\x1b[2K`;
+    const rule = dim('─'.repeat(this.cols));
+    const ruleTop = this.regionTop + 1;
+    const inputTop = ruleTop + 1;
+    const ruleBottom = inputTop + inputRows;
+    const hintTop = ruleBottom + 1;
+    out += `\x1b[${ruleTop};1H\x1b[2K${rule}`;
     let cursorRow = inputTop;
     let cursorCol = 1;
     if (this.choosing) {
@@ -428,13 +424,13 @@ export class RawTui implements ReplUi {
       out += `\x1b[${inputTop};1H\x1b[2K${title}`;
     } else {
       view!.rows.forEach((text, i) => {
-        const prefix = view!.startLine + i === 0 ? PROMPT_FIRST : PROMPT_CONT;
-        out += `\x1b[${inputTop + i};1H${INPUT_BG}\x1b[2K${prefix}${text}${INPUT_BG_OFF}`;
+        const prefix = view!.startLine + i === 0 ? cyan(PROMPT) : dim(PROMPT_CONT);
+        out += `\x1b[${inputTop + i};1H\x1b[2K${prefix}${text}`;
       });
       cursorRow = inputTop + view!.cursorRow;
       cursorCol = view!.cursorCol;
     }
-    out += `\x1b[${spacerBottom};1H\x1b[2K`;
+    out += `\x1b[${ruleBottom};1H\x1b[2K${rule}`;
     if (menuCount > 0) {
       const enterLabel = this.choosing
         ? 'select'
