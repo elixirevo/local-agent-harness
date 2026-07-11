@@ -11,6 +11,7 @@ import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
 import { rememberNote } from '../session/memory.js';
 import type { SessionStore } from '../session/store.js';
+import { expandSkill, type Skill } from '../skills/loader.js';
 import { bold, dim, green, red } from './ansi.js';
 import type { SlashCommand } from './editor.js';
 import { canUseRawTui, RawTui } from './tui.js';
@@ -29,6 +30,8 @@ export interface CliSession extends AgentSession {
   askFn?: AskFn;
   /** Tool names the user approved with "always" this session (shared with the gate). */
   sessionAllow: Set<string>;
+  /** Workflow files loaded from .harness/skills, invoked as /name. */
+  skills: Skill[];
   mcp?: McpConnection[];
 }
 
@@ -48,6 +51,28 @@ export const COMMANDS: SlashCommand[] = [
   { name: '/clear', desc: 'reset the conversation' },
   { name: '/exit', desc: 'quit' },
 ];
+
+/** Built-ins plus loaded skills — the list the hint bar and /help show. */
+export function allCommands(skills: Skill[]): SlashCommand[] {
+  return [...COMMANDS, ...skills.map((s) => ({ name: `/${s.name}`, desc: s.description }))];
+}
+
+/**
+ * If the input invokes a loaded skill (/name args), return the expanded
+ * prompt. Skill names can never collide with built-ins (the loader rejects
+ * reserved names), so this can safely run before built-in dispatch.
+ */
+export function resolveSkillInvocation(
+  session: Pick<CliSession, 'skills'>,
+  input: string,
+): { skill: Skill; prompt: string } | undefined {
+  if (!input.startsWith('/')) return undefined;
+  const [cmd, ...rest] = input.split(/\s+/);
+  const name = cmd.slice(1).toLowerCase();
+  const skill = session.skills.find((s) => s.name.toLowerCase() === name);
+  if (!skill) return undefined;
+  return { skill, prompt: expandSkill(skill, rest.join(' ').trim()) };
+}
 
 export function friendlyFetchError(providerName: string, baseUrl: string, err: unknown): string {
   const cause = (err as { cause?: { code?: string } })?.cause;
@@ -216,7 +241,9 @@ export async function oneShot(session: CliSession, prompt: string): Promise<void
   }
   const ui = writeOnlyUi();
   try {
-    await chatTurn(session, prompt, ui);
+    const invocation = resolveSkillInvocation(session, prompt.trim());
+    if (invocation) ui.write(dim(`[skill] ${invocation.skill.name}`) + '\n');
+    await chatTurn(session, invocation ? invocation.prompt : prompt, ui);
   } finally {
     ui.close();
   }
@@ -226,7 +253,7 @@ export async function runRepl(session: CliSession): Promise<void> {
   const useRaw = !session.plain && canUseRawTui();
   let ui: ReplUi;
   if (useRaw) {
-    ui = new RawTui(COMMANDS);
+    ui = new RawTui(allCommands(session.skills));
   } else {
     const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
     const rl = readline.createInterface({
@@ -266,8 +293,22 @@ export async function runRepl(session: CliSession): Promise<void> {
         continue;
       }
       if (input.startsWith('/')) {
-        if (await handleCommand(session, input, ui)) break;
-        ui.onIdle();
+        const invocation = resolveSkillInvocation(session, input);
+        if (!invocation) {
+          if (await handleCommand(session, input, ui)) break;
+          ui.onIdle();
+          continue;
+        }
+        ui.write(dim(`[skill] ${invocation.skill.name}`) + '\n');
+        currentAbort = new AbortController();
+        try {
+          await chatTurn(session, invocation.prompt, ui, currentAbort.signal);
+        } catch (err) {
+          printError(session, ui, err);
+        } finally {
+          currentAbort = null;
+          ui.onIdle();
+        }
         continue;
       }
       currentAbort = new AbortController();
@@ -305,8 +346,13 @@ function printBanner(session: CliSession, ui: ReplUi): void {
   l();
 }
 
-function helpText(): string {
-  return ['commands:', ...COMMANDS.map((c) => `  ${c.name.padEnd(11)} ${c.desc}`)].join('\n');
+function helpText(session: CliSession): string {
+  const lines = ['commands:', ...COMMANDS.map((c) => `  ${c.name.padEnd(11)} ${c.desc}`)];
+  if (session.skills.length > 0) {
+    lines.push('skills (.harness/skills):');
+    for (const s of session.skills) lines.push(`  /${s.name.padEnd(10)} ${s.description}`);
+  }
+  return lines.join('\n');
 }
 
 /** Returns true when the REPL should exit. */
@@ -319,7 +365,7 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
     case '/quit':
       return true;
     case '/help':
-      l(helpText());
+      l(helpText(session));
       return false;
     case '/plan': {
       const planFile = planFilePath(session.toolCtx.cwd);

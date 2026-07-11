@@ -134,6 +134,31 @@ config에 stdio MCP 서버를 등록하면 그 도구들이 `mcp__서버명__도
 호출 순서대로 회수된다. 서브에이전트를 실제로 병렬 실행하려면 Ollama는 `OLLAMA_NUM_PARALLEL=2+`가
 필요하다(로컬 파일 읽기는 무관하게 병렬).
 
+## 스킬 — 파일로 저장하는 워크플로우
+
+`.harness/skills/*.md`(프로젝트) 또는 `~/.harness/skills/*.md`(전역, 프로젝트가 가림)에 스킬을
+저장하면 `/이름 [인자]`로 호출할 수 있다. 호출 시 본문이 그 턴의 프롬프트로 확장된다
+(`$ARGUMENTS` 치환, 없으면 인자를 Input 라인으로 첨부). 폴더형(`<name>/SKILL.md` + 참고 파일)도
+지원 — 본문에서 "자세한 건 reference.md를 Read해라"로 가리키면 필요할 때만 컨텍스트에 들어온다.
+
+```markdown
+---
+name: fix-failing-test
+description: run the tests, fix the failure, verify   # 힌트 바/help에 노출
+---
+1. Run `node test.js` with Bash and read the failure output.
+2. Read the file the failure points to and find the cause.
+3. Fix it with Edit — the minimal change only.
+4. Run the tests again and confirm. If not, go back to step 2.
+
+Task input: $ARGUMENTS
+```
+
+- 하단 힌트 바에 자동 노출된다(`/fi` 입력 → `/fix-failing-test`). `/help`에도 skills 섹션으로 표시.
+- 스스로 다단계 계획을 못 세우는 소형 모델일수록 효과가 크다 — 검증된 단계를 파일로 박제하는 것.
+- 이름은 kebab-case, 빌트인 명령과 충돌하면 로드가 거부된다.
+- **주의**: 스킬은 설계상 프롬프트 주입이다. 서드파티 스킬은 코드처럼 리뷰 후 설치할 것.
+
 ## /remember — 세션 메모리
 
 `/remember <note>`는 프로젝트 AGENTS.md의 관리 섹션(`## Harness notes`)에 날짜 붙은 노트를

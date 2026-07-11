@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import os from 'node:os';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { createAgentTool } from '../agents/agentTool.js';
 import { ReminderQueue } from '../context/reminders.js';
@@ -12,8 +14,9 @@ import { planFilePath, planModeEnterReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { ChatMessage } from '../providers/types.js';
 import { loadSession, newSessionId, SessionStore } from '../session/store.js';
+import { loadSkills } from '../skills/loader.js';
 import { defaultRegistry } from '../tools/registry.js';
-import { friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
+import { COMMANDS, friendlyFetchError, oneShot, runRepl, type CliSession } from './repl.js';
 
 const VERSION = '0.1.0';
 
@@ -207,6 +210,13 @@ async function main(): Promise<void> {
   if (planMode) reminders.enqueue(planModeEnterReminder(planFile));
   const sessionAllow = new Set<string>();
 
+  const skillsLoad = loadSkills({
+    projectDir: path.join(cwd, '.harness', 'skills'),
+    globalDir: path.join(os.homedir(), '.harness', 'skills'),
+    reserved: new Set([...COMMANDS.map((c) => c.name.slice(1)), 'quit']),
+  });
+  for (const w of skillsLoad.warnings) console.error(`warning: skills: ${w}`);
+
   const session: CliSession = {
     provider,
     providerName,
@@ -233,6 +243,7 @@ async function main(): Promise<void> {
     planMode,
     plain: values.plain === true,
     sessionAllow,
+    skills: skillsLoad.skills,
     mcp,
   };
 
