@@ -22,6 +22,20 @@ export type WebFetchMode = 'off' | 'native' | 'mcp';
 
 export const WEB_FETCH_MODES: WebFetchMode[] = ['off', 'native', 'mcp'];
 
+/**
+ * OS-level isolation for Bash commands (macOS Seatbelt). Independent of the
+ * permission gate: the gate decides what may run, the sandbox bounds what a
+ * running command can touch (writes → cwd+tmp, network → blocked by default).
+ */
+export interface SandboxConfig {
+  /** Wrap Bash commands in the OS sandbox. CLI: --sandbox / --no-sandbox. */
+  bash: 'off' | 'on';
+  /** Allow network access inside sandboxed commands. */
+  allowNetwork: boolean;
+  /** Extra directories sandboxed commands may write to (absolute paths). */
+  extraWritePaths: string[];
+}
+
 export interface HarnessConfig {
   defaultProvider: string;
   defaultModel?: string;
@@ -43,6 +57,8 @@ export interface HarnessConfig {
   };
   /** Web access for the model (see WebFetchMode). CLI: --web <mode>. */
   webFetch: WebFetchMode;
+  /** Bash isolation (see SandboxConfig). */
+  sandbox: SandboxConfig;
   /** MCP servers to connect over stdio; their tools register as mcp__name__tool. */
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   /** Profile overrides keyed by exact model id or family name. */
@@ -72,6 +88,7 @@ const DEFAULTS: HarnessConfig = {
   saveSessions: true,
   compaction: DEFAULT_COMPACTION,
   webFetch: 'off',
+  sandbox: { bash: 'off', allowNetwork: false, extraWritePaths: [] },
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -91,6 +108,7 @@ export function loadConfig(cwd: string = process.cwd()): HarnessConfig {
     ...user,
     providers: { ...structuredClone(DEFAULTS.providers), ...(user.providers ?? {}) },
     compaction: { ...DEFAULT_COMPACTION, ...(user.compaction ?? {}) },
+    sandbox: { ...structuredClone(DEFAULTS.sandbox), ...(user.sandbox ?? {}) },
   };
   if (!merged.providers[merged.defaultProvider]) {
     throw new Error(
@@ -99,6 +117,9 @@ export function loadConfig(cwd: string = process.cwd()): HarnessConfig {
   }
   if (!WEB_FETCH_MODES.includes(merged.webFetch)) {
     throw new Error(`invalid webFetch "${merged.webFetch}" — use one of: ${WEB_FETCH_MODES.join(', ')}`);
+  }
+  if (merged.sandbox.bash !== 'off' && merged.sandbox.bash !== 'on') {
+    throw new Error(`invalid sandbox.bash "${merged.sandbox.bash}" — use "off" or "on"`);
   }
   return merged;
 }

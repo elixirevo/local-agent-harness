@@ -14,6 +14,7 @@ import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
 import { planFilePath, planModeEnterReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { ChatMessage } from '../providers/types.js';
+import { sandboxAvailable, sessionSandbox } from '../sandbox/exec.js';
 import { loadSession, newSessionId, SESSIONS_DIR, SessionStore } from '../session/store.js';
 import { loadSkills } from '../skills/loader.js';
 import { defaultRegistry } from '../tools/registry.js';
@@ -54,6 +55,9 @@ Options:
                                (default: config.webFetch, else off)
                                native: built-in WebFetch tool (GET, public hosts)
                                mcp: connect an MCP fetch server (uvx mcp-server-fetch)
+      --sandbox / --no-sandbox wrap Bash commands in the OS sandbox (macOS Seatbelt):
+                               writes limited to cwd+tmp, network blocked
+                               (default: config.sandbox.bash, else off)
       --no-think               disable thinking on models that support toggling it
   -h, --help                   show help
   -v, --version                show version
@@ -83,6 +87,8 @@ async function main(): Promise<void> {
       ctx: { type: 'string' },
       system: { type: 'string' },
       web: { type: 'string' },
+      sandbox: { type: 'boolean' },
+      'no-sandbox': { type: 'boolean' },
       'no-think': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -118,6 +124,13 @@ async function main(): Promise<void> {
       die(`invalid --web "${values.web}" — use one of: ${WEB_FETCH_MODES.join(', ')}`);
     }
     config.webFetch = values.web as WebFetchMode;
+  }
+
+  if (values.sandbox) config.sandbox.bash = 'on';
+  if (values['no-sandbox']) config.sandbox.bash = 'off';
+  const sandbox = sessionSandbox(cwd, config.sandbox);
+  if (config.sandbox.bash === 'on' && !sandbox && !sandboxAvailable()) {
+    console.error('warning: sandbox requested but unavailable on this platform — Bash runs without isolation');
   }
 
   let resumed = values.resume !== undefined ? tryLoad(cwd, values.resume) : undefined;
@@ -266,7 +279,7 @@ async function main(): Promise<void> {
     gate: planMode
       ? new PermissionGate('plan', cwd, undefined, planFile, sessionAllow)
       : new PermissionGate(mode, cwd, undefined, undefined, sessionAllow),
-    toolCtx: { cwd, readFiles: new Map() },
+    toolCtx: { cwd, readFiles: new Map(), sandbox },
     maxSteps: config.maxSteps,
     protocol,
     reminders,

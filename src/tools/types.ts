@@ -34,6 +34,14 @@ export interface FileMark {
   hash: string;
 }
 
+/** OS sandbox for command execution (macOS Seatbelt), when active. */
+export interface SandboxState {
+  /** Seatbelt profile computed for this session's cwd. */
+  profile: string;
+  /** True when unsandboxed bypass is not allowed (approval-free subagents). */
+  forced?: boolean;
+}
+
 export interface ToolContext {
   cwd: string;
   /**
@@ -41,6 +49,8 @@ export interface ToolContext {
    * contract: prompts teach it, this enforces it.
    */
   readFiles: Map<string, FileMark>;
+  /** Present when Bash commands should run inside the OS sandbox. */
+  sandbox?: SandboxState;
 }
 
 export type RiskLevel = 'read' | 'mutate' | 'destructive';
@@ -56,6 +66,8 @@ export interface Tool {
   pathOf?(input: Record<string, unknown>, ctx: ToolContext): string | undefined;
   /** Per-call risk override (e.g. Bash classifies each command); defaults to isReadOnly. */
   riskOf?(input: Record<string, unknown>, ctx: ToolContext): RiskLevel;
+  /** True when this specific call will execute inside the OS sandbox. */
+  sandboxedRun?(input: Record<string, unknown>, ctx: ToolContext): boolean;
   call(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 

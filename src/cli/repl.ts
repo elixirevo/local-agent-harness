@@ -334,7 +334,8 @@ function toolsLine(session: CliSession): string {
   if (session.protocol === 'none') return 'tools: disabled (--protocol none)';
   const names = session.registry.list(session.gate.mode).map((t) => t.name);
   const plan = session.planMode ? ' · PLAN MODE' : '';
-  return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}${plan}`;
+  const sandbox = session.toolCtx.sandbox ? ' · sandbox: seatbelt' : '';
+  return `tools: ${names.join(', ')} · protocol: ${session.protocol} · permission mode: ${session.gate.mode}${sandbox}${plan}`;
 }
 
 function printBanner(session: CliSession, ui: ReplUi): void {

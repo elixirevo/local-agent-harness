@@ -32,6 +32,23 @@ describe('loadConfig webFetch', () => {
   });
 });
 
+describe('loadConfig sandbox', () => {
+  it('defaults to off with no network and no extra paths', () => {
+    const c = loadConfig(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-empty-')));
+    expect(c.sandbox).toEqual({ bash: 'off', allowNetwork: false, extraWritePaths: [] });
+  });
+
+  it('merges partial sandbox config over defaults', () => {
+    const c = loadConfig(dirWithConfig({ sandbox: { bash: 'on' } }));
+    expect(c.sandbox.bash).toBe('on');
+    expect(c.sandbox.allowNetwork).toBe(false);
+  });
+
+  it('rejects unknown sandbox.bash values', () => {
+    expect(() => loadConfig(dirWithConfig({ sandbox: { bash: 'always' } }))).toThrow(/invalid sandbox.bash/);
+  });
+});
+
 describe('effectiveMcpServers', () => {
   it('returns only user servers when webFetch is off or native', () => {
     const off = loadConfig(dirWithConfig({ mcpServers: { db: { command: 'x' } } }));
