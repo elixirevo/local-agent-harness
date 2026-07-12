@@ -30,8 +30,8 @@ npm start -- -p "src의 버그 고쳐줘" -M auto    # one-shot 에이전트 실
 npm start -- -P llamacpp                     # 프로바이더 지정
 ```
 
-REPL 명령: `/help` `/models` `/model <id>` `/provider <name>` `/plan` `/mcp` `/remember <note>`
-`/context` `/compact` `/session` `/clear` `/exit`
+REPL 명령: `/help` `/models`(메뉴에서 모델 선택) `/model <id>` `/provider <name>` `/plan` `/mcp`
+`/remember <note>` `/context` `/compact` `/session` `/clear` `/exit`
 
 ### 전역 설치 — 어디서든 `harness`
 

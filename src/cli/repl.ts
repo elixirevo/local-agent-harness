@@ -41,7 +41,7 @@ const PROMPT = '❯ ';
 
 export const COMMANDS: SlashCommand[] = [
   { name: '/help', desc: 'show help' },
-  { name: '/models', desc: 'list models on the provider' },
+  { name: '/models', desc: 'pick a model from the provider' },
   { name: '/model', desc: '<id> — switch model' },
   { name: '/provider', desc: '<name> — switch provider' },
   { name: '/plan', desc: 'toggle plan mode (read-only + plan file)' },
@@ -420,6 +420,27 @@ async function resumeCommand(session: CliSession, ui: ReplUi, arg: string | unde
   }
 }
 
+/** Switch the session to a model: profile, context length, thinking. */
+function applyModel(session: CliSession, id: string, l: (s?: string) => void): void {
+  session.model = id;
+  session.profile = resolveProfile(id, session.config.models);
+  session.contextLength = effectiveContextLength(session.profile, session.config);
+  session.think = session.profile.thinking === 'none' ? undefined : true;
+  l(
+    dim(
+      `model → ${id} (family ${session.profile.family} · ctx ${session.contextLength} · thinking ${session.profile.thinking})`,
+    ),
+  );
+  const wantsNative = session.profile.nativeToolCalls;
+  if ((session.protocol === 'native') !== wantsNative) {
+    l(
+      dim(
+        `note: this model ${wantsNative ? 'supports native tool calls' : 'has no native tool-call support'} but the session protocol is "${session.protocol}" (fixed at startup) — restart to change it`,
+      ),
+    );
+  }
+}
+
 async function handleCommand(session: CliSession, input: string, ui: ReplUi): Promise<boolean> {
   const [cmd, ...rest] = input.split(/\s+/);
   const arg = rest.join(' ');
@@ -527,7 +548,29 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
     case '/models': {
       try {
         const models = await session.provider.listModels();
-        l(models.length ? models.join('\n') : dim('(no models)'));
+        if (models.length === 0) {
+          l(dim('(no models)'));
+          return false;
+        }
+        const items = models.map((m) => {
+          const p = resolveProfile(m, session.config.models);
+          const ctx = effectiveContextLength(p, session.config);
+          const current = m === session.model ? ' · current' : '';
+          return {
+            name: m,
+            desc: `${p.family} · ctx ${ctx} · ${p.nativeToolCalls ? 'native tools' : 'text protocol'}${current}`,
+          };
+        });
+        const idx = await ui.choose('switch to which model?', items);
+        if (idx === undefined) {
+          l(dim('cancelled'));
+          return false;
+        }
+        if (models[idx] === session.model) {
+          l(dim(`already on ${session.model}`));
+          return false;
+        }
+        applyModel(session, models[idx], l);
       } catch (err) {
         printError(session, ui, err);
       }
@@ -538,23 +581,7 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
         l(`current model: ${session.model}`);
         return false;
       }
-      session.model = arg;
-      session.profile = resolveProfile(arg, session.config.models);
-      session.contextLength = effectiveContextLength(session.profile, session.config);
-      session.think = session.profile.thinking === 'none' ? undefined : true;
-      l(
-        dim(
-          `model → ${arg} (family ${session.profile.family} · ctx ${session.contextLength} · thinking ${session.profile.thinking})`,
-        ),
-      );
-      const wantsNative = session.profile.nativeToolCalls;
-      if ((session.protocol === 'native') !== wantsNative) {
-        l(
-          dim(
-            `note: this model ${wantsNative ? 'supports native tool calls' : 'has no native tool-call support'} but the session protocol is "${session.protocol}" (fixed at startup) — restart to change it`,
-          ),
-        );
-      }
+      applyModel(session, arg, l);
       return false;
     }
     case '/provider': {
