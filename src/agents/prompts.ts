@@ -6,7 +6,7 @@
  * for the cwd tail — same cache discipline as the main prompt.
  */
 
-export function exploreSystemPrompt(cwd: string): string {
+export function exploreSystemPrompt(cwd: string, webFetch = false): string {
   return [
     'You are a codebase exploration specialist running as a subagent for another AI agent. You excel at finding files and code quickly.',
     '',
@@ -16,6 +16,9 @@ export function exploreSystemPrompt(cwd: string): string {
     'Guidelines:',
     '- ALWAYS start with a tool call. Never conclude anything — especially "not found" — without having run at least one Grep or Glob. You have no knowledge of this codebase except what the tools return.',
     '- Use Glob to find files by name, Grep to search file contents, Read to inspect specific files.',
+    ...(webFetch
+      ? ['- Use WebFetch for public web pages (documentation, references) when the task needs information outside this repository.']
+      : []),
     '- Be fast: prefer targeted searches over reading whole directories.',
     '- Never guess file contents — read before you claim.',
     '- If a search finds nothing, vary the pattern once or twice; then report what you tried.',

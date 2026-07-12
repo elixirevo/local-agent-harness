@@ -9,6 +9,7 @@ import { globTool } from '../tools/glob.js';
 import { grepTool } from '../tools/grep.js';
 import { readTool } from '../tools/read.js';
 import { ToolRegistry } from '../tools/registry.js';
+import { webFetchTool } from '../tools/webfetch.js';
 import { exploreSystemPrompt, verifySystemPrompt } from './prompts.js';
 
 export type SubagentType = 'explore' | 'verify';
@@ -52,6 +53,10 @@ export async function runSubagent(
   const profile = resolveProfile(model, deps.config.models);
 
   const registry = new ToolRegistry().register(readTool).register(globTool).register(grepTool);
+  // WebFetch is a read — it fits both the explore (readonly gate) and verify
+  // scopes. Only the native tool travels; MCP fetch tools stay main-session.
+  const webFetch = deps.config.webFetch === 'native';
+  if (webFetch) registry.register(webFetchTool);
   let gate: PermissionGate;
   if (type === 'verify') {
     registry.register(bashTool);
@@ -60,7 +65,7 @@ export async function runSubagent(
     gate = new PermissionGate('readonly', deps.cwd, undefined);
   }
 
-  const systemPrompt = type === 'explore' ? exploreSystemPrompt(deps.cwd) : verifySystemPrompt(deps.cwd);
+  const systemPrompt = type === 'explore' ? exploreSystemPrompt(deps.cwd, webFetch) : verifySystemPrompt(deps.cwd);
   const session: AgentSession = {
     provider: deps.provider,
     model,

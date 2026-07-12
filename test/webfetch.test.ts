@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  decodeBody,
   fetchWeb,
   guardUrl,
   htmlToText,
@@ -99,6 +100,37 @@ describe('htmlToText', () => {
   });
 });
 
+// "한글" in EUC-KR (two 2-byte syllables) — not valid UTF-8.
+const HANGUL_EUCKR = Buffer.from([0xc7, 0xd1, 0xb1, 0xdb]);
+
+describe('decodeBody (charset detection)', () => {
+  it('decodes EUC-KR when the header declares it', () => {
+    expect(decodeBody(HANGUL_EUCKR, 'euc-kr')).toBe('한글');
+    expect(decodeBody(HANGUL_EUCKR, 'EUC-KR')).toBe('한글');
+  });
+
+  it('sniffs the charset from an HTML meta tag when the header is silent', () => {
+    const html = Buffer.concat([
+      Buffer.from('<html><head><meta charset="euc-kr"></head><body><p>'),
+      HANGUL_EUCKR,
+      Buffer.from('</p></body></html>'),
+    ]);
+    expect(decodeBody(html)).toContain('한글');
+    const httpEquiv = Buffer.concat([
+      Buffer.from('<html><head><meta http-equiv="Content-Type" content="text/html; charset=euc-kr"></head><body>'),
+      HANGUL_EUCKR,
+      Buffer.from('</body></html>'),
+    ]);
+    expect(decodeBody(httpEquiv)).toContain('한글');
+  });
+
+  it('defaults to utf-8 and falls back on unknown labels', () => {
+    const utf8 = Buffer.from('한글');
+    expect(decodeBody(utf8)).toBe('한글');
+    expect(decodeBody(utf8, 'no-such-charset')).toBe('한글');
+  });
+});
+
 describe('fetchWeb', () => {
   it('fetches an HTML page and converts it to text', async () => {
     const { fn } = fetchMock(
@@ -170,6 +202,22 @@ describe('fetchWeb', () => {
       maxBodyBytes: 100,
     });
     expect(r.capped).toBe(true);
+  });
+
+  it('returns readable text from an EUC-KR page', async () => {
+    const page = Buffer.concat([
+      Buffer.from('<html><head><meta charset="euc-kr"><title>'),
+      HANGUL_EUCKR,
+      Buffer.from('</title></head><body><p>'),
+      HANGUL_EUCKR,
+      Buffer.from('</p></body></html>'),
+    ]);
+    const { fn } = fetchMock(
+      () => new Response(page, { status: 200, headers: { 'content-type': 'text/html' } }),
+    );
+    const r = await fetchWeb('https://old.example.co.kr/', { lookupFn: publicLookup, fetchFn: fn });
+    expect(r.text).toContain('한글');
+    expect(r.text).not.toContain('�');
   });
 
   it('detects HTML by sniffing when content-type is missing', async () => {

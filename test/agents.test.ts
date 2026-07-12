@@ -106,6 +106,35 @@ describe('runSubagent', () => {
     const result = await runSubagent(d, 'explore', 'quick look');
     expect(result.model).toBe('tiny-model');
   });
+
+  it('offers WebFetch to both subagent types when webFetch is native', async () => {
+    const { ctx } = tmpCtx();
+    for (const type of ['explore', 'verify'] as const) {
+      const provider = new ScriptedProvider([textStep('Scope: x\nResult: y\nKey files: z\nVERDICT: PASS')]);
+      const d = deps(provider, ctx.cwd);
+      d.config.webFetch = 'native';
+      await runSubagent(d, type, 'look something up');
+      expect(provider.received[0].toolNames).toContain('WebFetch');
+    }
+  });
+
+  it('keeps WebFetch out of subagents when webFetch is off, and out of the explore prompt', async () => {
+    const { ctx } = tmpCtx();
+    const provider = new ScriptedProvider([textStep('Scope: x\nResult: y\nKey files: z')]);
+    const d = deps(provider, ctx.cwd); // defaults: webFetch 'off'
+    await runSubagent(d, 'explore', 'quick look');
+    expect(provider.received[0].toolNames).not.toContain('WebFetch');
+    expect(provider.received[0].system).not.toContain('WebFetch');
+  });
+
+  it('mentions WebFetch in the explore prompt when enabled', async () => {
+    const { ctx } = tmpCtx();
+    const provider = new ScriptedProvider([textStep('Scope: x\nResult: y\nKey files: z')]);
+    const d = deps(provider, ctx.cwd);
+    d.config.webFetch = 'native';
+    await runSubagent(d, 'explore', 'quick look');
+    expect(provider.received[0].system).toContain('WebFetch');
+  });
 });
 
 describe('parseVerdict', () => {

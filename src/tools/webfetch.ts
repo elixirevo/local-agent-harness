@@ -175,7 +175,8 @@ export async function fetchWeb(raw: string, opts: FetchWebOptions = {}): Promise
         await res.body?.cancel().catch(() => {});
         throw new Error(`unsupported binary content-type: ${contentType}`);
       }
-      const { text: body, capped } = await readBody(res, maxBody);
+      const { bytes, capped } = await readBody(res, maxBody);
+      const body = decodeBody(bytes, /charset=([^;\s"']+)/i.exec(contentType)?.[1]);
       const isHtml =
         /text\/html|application\/xhtml/i.test(contentType) ||
         (contentType === '' && /^\s*(<!doctype html|<html)/i.test(body));
@@ -195,8 +196,8 @@ export async function fetchWeb(raw: string, opts: FetchWebOptions = {}): Promise
   }
 }
 
-async function readBody(res: Response, cap: number): Promise<{ text: string; capped: boolean }> {
-  if (!res.body) return { text: await res.text(), capped: false };
+async function readBody(res: Response, cap: number): Promise<{ bytes: Buffer; capped: boolean }> {
+  if (!res.body) return { bytes: Buffer.from(await res.arrayBuffer()), capped: false };
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -212,7 +213,32 @@ async function readBody(res: Response, cap: number): Promise<{ text: string; cap
       break;
     }
   }
-  return { text: Buffer.concat(chunks).toString('utf8'), capped };
+  return { bytes: Buffer.concat(chunks), capped };
+}
+
+/**
+ * Decode a response body honoring its declared charset — header first, then
+ * an HTML <meta charset> sniff over the head of the document. Korean sites
+ * on EUC-KR (and legacy pages generally) garble under a blind utf-8 decode.
+ */
+export function decodeBody(bytes: Uint8Array, headerCharset?: string): string {
+  let charset = headerCharset?.toLowerCase();
+  if (!charset) {
+    // The meta tag is ASCII, so a latin1 view of the head is safe to scan.
+    const head = Buffer.from(bytes.subarray(0, 2048)).toString('latin1');
+    charset = (
+      /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(head) ??
+      /<\?xml[^>]+encoding\s*=\s*["']([\w-]+)/i.exec(head)
+    )?.[1]?.toLowerCase();
+  }
+  if (!charset || charset === 'utf-8' || charset === 'utf8') {
+    return Buffer.from(bytes).toString('utf8');
+  }
+  try {
+    return new TextDecoder(charset).decode(bytes);
+  } catch {
+    return Buffer.from(bytes).toString('utf8'); // unknown label → utf-8
+  }
 }
 
 export const webFetchTool: Tool = {
