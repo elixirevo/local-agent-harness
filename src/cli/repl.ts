@@ -9,6 +9,7 @@ import { PermissionGate, type AskFn, type PermissionMode } from '../permissions/
 import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
+import { sandboxAvailable, sessionSandbox } from '../sandbox/exec.js';
 import { rememberNote } from '../session/memory.js';
 import { listSessions, loadSession, SessionStore } from '../session/store.js';
 import { expandSkill, type Skill } from '../skills/loader.js';
@@ -45,6 +46,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: '/model', desc: '<id> — switch model' },
   { name: '/provider', desc: '<name> — switch provider' },
   { name: '/plan', desc: 'toggle plan mode (read-only + plan file)' },
+  { name: '/sandbox', desc: 'toggle the Bash sandbox (or: /sandbox on|off)' },
   { name: '/mcp', desc: 'list connected MCP servers' },
   { name: '/remember', desc: '<note> — save to AGENTS.md' },
   { name: '/session', desc: 'show where this session is saved' },
@@ -470,6 +472,34 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
         );
         session.reminders.enqueue(planModeExitReminder(planFile));
         l(dim(`plan mode OFF (permission mode: ${session.baseMode})`));
+      }
+      return false;
+    }
+    case '/sandbox': {
+      const current = session.toolCtx.sandbox !== undefined;
+      let target: boolean;
+      if (arg === 'on') target = true;
+      else if (arg === 'off') target = false;
+      else if (arg) {
+        l(red(`unknown argument "${arg}" — use /sandbox, /sandbox on, or /sandbox off`));
+        return false;
+      } else target = !current;
+      if (target === current) {
+        l(dim(`sandbox already ${current ? 'on' : 'off'}`));
+        return false;
+      }
+      if (target) {
+        if (!sandboxAvailable()) {
+          l(red('sandbox unavailable on this platform (needs macOS sandbox-exec)'));
+          return false;
+        }
+        session.config.sandbox.bash = 'on';
+        session.toolCtx.sandbox = sessionSandbox(session.toolCtx.cwd, session.config.sandbox);
+        l(dim('sandbox ON — Bash writes limited to cwd+tmp, network blocked; sandboxed mutations run without asking'));
+      } else {
+        session.config.sandbox.bash = 'off';
+        session.toolCtx.sandbox = undefined;
+        l(dim('sandbox OFF — Bash runs unrestricted; mutations ask for approval again'));
       }
       return false;
     }
