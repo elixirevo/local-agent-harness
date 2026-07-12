@@ -81,3 +81,46 @@ describe('PermissionGate approvals', () => {
     expect((await gate.check(writeTool, { file_path: 'a.ts', content: 'x' }, ctx)).allowed).toBe(false);
   });
 });
+
+describe('PermissionGate + sandbox (ask mode shortcut)', () => {
+  const sandboxedCtx = (ctx: ToolContext): ToolContext => ({ ...ctx, sandbox: { profile: 'P' } });
+
+  it('lets a sandboxed mutate run without asking', async () => {
+    const { ctx } = tmpCtx();
+    let asked = 0;
+    const gate = new PermissionGate('ask', ctx.cwd, async () => {
+      asked++;
+      return 'once';
+    });
+    const d = await gate.check(bashTool, { command: 'npm run build' }, sandboxedCtx(ctx));
+    expect(d.allowed).toBe(true);
+    expect(d.autoAllowed).toBe(true);
+    expect(asked).toBe(0);
+  });
+
+  it('still asks without a sandbox, for unsandboxed escapes, and for destructive', async () => {
+    const { ctx } = tmpCtx();
+    let asked = 0;
+    const gate = new PermissionGate('ask', ctx.cwd, async () => {
+      asked++;
+      return 'once';
+    });
+    await gate.check(bashTool, { command: 'npm run build' }, ctx); // no sandbox
+    expect(asked).toBe(1);
+    await gate.check(bashTool, { command: 'npm run build', unsandboxed: true }, sandboxedCtx(ctx));
+    expect(asked).toBe(2);
+    await gate.check(bashTool, { command: 'rm -rf build' }, sandboxedCtx(ctx)); // destructive
+    expect(asked).toBe(3);
+  });
+
+  it('does not shortcut tools that do not run sandboxed (Write/Edit)', async () => {
+    const { ctx } = tmpCtx();
+    let asked = 0;
+    const gate = new PermissionGate('ask', ctx.cwd, async () => {
+      asked++;
+      return 'once';
+    });
+    await gate.check(writeTool, { file_path: 'a', content: 'x' }, sandboxedCtx(ctx));
+    expect(asked).toBe(1); // Write is in-process — Seatbelt does not cover it
+  });
+});

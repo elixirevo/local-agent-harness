@@ -61,6 +61,13 @@ export class PermissionGate {
     if (risk !== 'destructive' && this.sessionAllow.has(tool.name)) {
       return { allowed: true, autoAllowed: true };
     }
+    // A mutate call that will execute inside the OS sandbox is already
+    // bounded (writes → cwd+tmp, no network), so ask mode lets it run
+    // without a prompt. Destructive never gets this shortcut, and a call
+    // escaping the sandbox (unsandboxed: true) reports sandboxedRun=false.
+    if (this.mode === 'ask' && risk === 'mutate' && tool.sandboxedRun?.(input, ctx) === true) {
+      return { allowed: true, autoAllowed: true };
+    }
     if (this.mode === 'auto' && risk === 'mutate') {
       const target = tool.pathOf?.(input, ctx);
       const outsideCwd = target !== undefined && isOutside(this.cwd, target);
