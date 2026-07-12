@@ -4,6 +4,7 @@ import { runTurn, type AgentSession } from '../core/loop.js';
 import { resolveProfile } from '../models/profile.js';
 import { PermissionGate } from '../permissions/gate.js';
 import type { ProviderAdapter } from '../providers/types.js';
+import { sessionSandbox } from '../sandbox/exec.js';
 import { bashTool } from '../tools/bash.js';
 import { globTool } from '../tools/glob.js';
 import { grepTool } from '../tools/grep.js';
@@ -58,9 +59,13 @@ export async function runSubagent(
   const webFetch = deps.config.webFetch === 'native';
   if (webFetch) registry.register(webFetchTool);
   let gate: PermissionGate;
+  let sandbox: ReturnType<typeof sessionSandbox>;
   if (type === 'verify') {
     registry.register(bashTool);
     gate = new PermissionGate('auto', deps.cwd, undefined);
+    // verify runs Bash approval-free — force the sandbox whenever the
+    // platform has one, with no unsandboxed bypass (config cannot disable it).
+    sandbox = sessionSandbox(deps.cwd, deps.config.sandbox, true);
   } else {
     gate = new PermissionGate('readonly', deps.cwd, undefined);
   }
@@ -75,7 +80,7 @@ export async function runSubagent(
     messages: [{ role: 'system', content: systemPrompt }],
     registry,
     gate,
-    toolCtx: { cwd: deps.cwd, readFiles: new Map() },
+    toolCtx: { cwd: deps.cwd, readFiles: new Map(), sandbox },
     maxSteps: deps.config.agents?.maxSteps ?? SUBAGENT_MAX_STEPS,
     protocol: profile.nativeToolCalls ? 'native' : 'text',
     reminders: new ReminderQueue(),

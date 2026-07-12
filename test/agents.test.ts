@@ -1,9 +1,11 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createAgentTool } from '../src/agents/agentTool.js';
 import { parseVerdict, runSubagent, type SubagentDeps } from '../src/agents/subagent.js';
 import { loadConfig } from '../src/config/config.js';
+import { sandboxAvailable } from '../src/sandbox/exec.js';
 import type {
   ChatChunk,
   ChatRequest,
@@ -135,6 +137,26 @@ describe('runSubagent', () => {
     await runSubagent(d, 'explore', 'quick look');
     expect(provider.received[0].system).toContain('WebFetch');
   });
+
+  it.skipIf(!sandboxAvailable())(
+    'verify runs Bash inside a forced sandbox even with sandbox off in config',
+    async () => {
+      const { dir, ctx } = tmpCtx();
+      const outside = fs.mkdtempSync(path.join(os.homedir(), '.sb-agents-'));
+      try {
+        const provider = new ScriptedProvider([
+          toolStep(call('Bash', { command: `echo leak > ${outside}/leak.txt` })),
+          textStep('Write failed.\nVERDICT: PARTIAL'),
+        ]);
+        const d = deps(provider, ctx.cwd); // config default: sandbox.bash 'off'
+        await runSubagent(d, 'verify', 'try to write outside');
+        expect(fs.existsSync(path.join(outside, 'leak.txt'))).toBe(false); // sandbox blocked it
+        void dir;
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('parseVerdict', () => {

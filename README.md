@@ -100,11 +100,45 @@ mutate 취급.
 | 모드 | 동작 |
 |---|---|
 | `readonly` | 변이 도구(Write/Edit/Bash)를 모델에게 아예 제공하지 않음 |
-| `ask` | 변이 호출마다 확인. read 분류 Bash 명령은 자동 허용 |
+| `ask` | 변이 호출마다 확인. read 분류 Bash 명령은 자동 허용 (샌드박스가 켜져 있으면 격리된 mutate도 자동 — 아래 샌드박스 참조) |
 | `auto` | 작업 디렉터리 안의 변이는 자동 허용. **destructive는 항상 확인** |
 
 `ask` 모드의 승인 프롬프트는 **y(허용) / n(거부) / a(항상)** 로 답한다. `a`는 그 도구(예: Write)를
 세션 동안 다시 묻지 않도록 기억한다(파괴적 명령은 항상 확인 — a를 제공하지 않음).
+
+## 샌드박스 (Bash 격리)
+
+게이트가 "무엇을 실행할지"를 정한다면, 샌드박스는 "실행 중인 명령이 무엇을 건드릴 수 있는지"를
+OS 수준에서 제한한다(macOS Seatbelt / `sandbox-exec`). 분류기의 오판이나 승인 실수, 웹 콘텐츠발
+프롬프트 인젝션이 있어도 피해 반경이 묶인다. 기본 off:
+
+```json
+{ "sandbox": { "bash": "on", "allowNetwork": false, "extraWritePaths": [] } }
+```
+
+CLI로는 `--sandbox` / `--no-sandbox`. 켜지면 배너에 `sandbox: seatbelt`가 표시되고 모든 Bash
+명령이 다음 정책으로 실행된다:
+
+| 항목 | 정책 |
+|---|---|
+| 파일 쓰기 | cwd + 임시 디렉터리(`/private/tmp`, TMPDIR) + `extraWritePaths`만 허용 |
+| 네트워크 | 차단 (`allowNetwork: true`로 허용) |
+| 파일 읽기 | 허용 — 네트워크가 막혀 있어 읽은 내용을 밖으로 보낼 수 없다 |
+
+동작 규칙:
+
+- **ask 모드 프롬프트 감소**: 샌드박스 안에서 실행될 mutate 명령(빌드, 테스트, git add...)은
+  이미 격리되어 있으므로 **확인 없이 실행**된다. destructive(rm, git push...)는 여전히 항상 확인.
+- **에스컬레이션**: 샌드박스에 막힌 명령(네트워크 필요, cwd 밖 쓰기)은 실패 출력에 안내가 붙고,
+  모델이 `unsandboxed: true`로 재시도하면 `[unsandboxed]` 표시와 함께 **사용자 승인**을 받는다.
+- **verify 서브에이전트는 강제 샌드박스**: 승인 없이 Bash를 실행하는 서브에이전트라서 config가
+  off여도 항상 격리되고, `unsandboxed` 우회도 무시된다.
+- Seatbelt가 없는 플랫폼에서는 경고 후 기존 동작(게이트만)으로 폴백한다.
+- Write/Edit 등 인프로세스 도구와 MCP 서버 프로세스는 Seatbelt 대상이 아니다 — 각각 게이트와
+  사용자의 신뢰 선택이 담당한다. WebFetch는 자체 SSRF 가드가 같은 역할을 한다.
+
+`npm install`처럼 네트워크가 필요한 명령은 "샌드박스 실패 → unsandboxed 재시도 → 승인" 두 단계를
+거치게 된다. 자주 쓰는 워크플로우라면 `allowNetwork: true`가 맞는 트레이드오프다.
 
 ## 텍스트 프로토콜 폴백
 
@@ -329,6 +363,7 @@ config `saveSessions: false`). 복원 경로 세 가지:
   "defaultModel": "qwen3:8b",
   "contextLength": 32768,
   "webFetch": "off",
+  "sandbox": { "bash": "off", "allowNetwork": false, "extraWritePaths": [] },
   "providers": {
     "ollama": { "type": "ollama", "baseUrl": "http://localhost:11434", "keepAlive": "10m" }
   },

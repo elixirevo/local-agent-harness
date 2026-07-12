@@ -6,6 +6,7 @@ import { effectiveContextLength, type HarnessConfig } from '../config/config.js'
 import { ReminderQueue } from '../context/reminders.js';
 import { startupContext } from '../context/startup.js';
 import { runTurn, type AgentSession } from '../core/loop.js';
+import { sessionSandbox } from '../sandbox/exec.js';
 import { resolveProfile, type PromptTier } from '../models/profile.js';
 import { PermissionGate } from '../permissions/gate.js';
 import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
@@ -134,7 +135,7 @@ async function runLoopScenario(
     ],
     registry,
     gate: new PermissionGate('auto', dir, undefined),
-    toolCtx: { cwd: dir, readFiles: new Map() },
+    toolCtx: { cwd: dir, readFiles: new Map(), sandbox: sessionSandbox(dir, harnessConfig.sandbox) },
     maxSteps: harnessConfig.maxSteps,
     protocol: cfg.protocol,
     reminders: new ReminderQueue(),
