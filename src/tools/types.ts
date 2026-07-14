@@ -62,6 +62,11 @@ export interface Tool {
   description(tier: PromptTier): string;
   /** One-line call summary for UI lines like "→ Read src/foo.ts". */
   summarize(input: Record<string, unknown>, ctx: ToolContext): string;
+  /**
+   * Multi-line preview for the approval prompt (e.g. a diff). Lines starting
+   * with "-"/"+" are colorized by the UI. Must be cheap and never throw.
+   */
+  preview?(input: Record<string, unknown>, ctx: ToolContext): string | undefined;
   /** Filesystem path this call mutates, for permission scoping. */
   pathOf?(input: Record<string, unknown>, ctx: ToolContext): string | undefined;
   /** Per-call risk override (e.g. Bash classifies each command); defaults to isReadOnly. */

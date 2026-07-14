@@ -1,7 +1,7 @@
 import type { Approval } from '../permissions/gate.js';
 import { bold, cyan, dim, displayWidth, green, red, truncateAnsi } from './ansi.js';
 import { computeMultilineView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
-import type { ReplUi } from './ui.js';
+import { renderPreview, type ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
 const WAIT_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -131,8 +131,9 @@ export class RawTui implements ReplUi {
     });
   }
 
-  ask(summary: string, allowAlways: boolean): Promise<Approval> {
+  ask(summary: string, allowAlways: boolean, preview?: string): Promise<Approval> {
     const opts = allowAlways ? '[y]es / [n]o / [a]lways' : '[y]es / [n]o';
+    if (preview) this.write(`${renderPreview(preview)}\n`);
     this.write(`${bold('approve?')} ${summary} — ${opts}\n`);
     return new Promise((resolve) => {
       this.askResolver = resolve;

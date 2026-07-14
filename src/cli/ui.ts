@@ -1,6 +1,6 @@
 import * as readline from 'node:readline/promises';
 import type { Approval } from '../permissions/gate.js';
-import { bold, dim, useColor } from './ansi.js';
+import { bold, dim, green, red, useColor } from './ansi.js';
 import type { SlashCommand } from './editor.js';
 
 /**
@@ -16,8 +16,8 @@ export interface ReplUi {
   write(s: string): void;
   /** Read one line of user input; undefined at EOF/close. */
   readLine(prompt: string): Promise<string | undefined>;
-  /** Approve a mutating call (y/n, or y/n/a when allowAlways). */
-  ask(summary: string, allowAlways: boolean): Promise<Approval>;
+  /** Approve a mutating call (y/n, or y/n/a when allowAlways). preview is a multi-line diff to show above the prompt. */
+  ask(summary: string, allowAlways: boolean, preview?: string): Promise<Approval>;
   /** Pick one item from a list; resolves to its index, or undefined if cancelled. */
   choose(title: string, items: SlashCommand[]): Promise<number | undefined>;
   /** Show/hide a "working" indicator during silent gaps. */
@@ -31,6 +31,18 @@ export interface ReplUi {
 }
 
 const write = (s: string) => process.stdout.write(s);
+
+/** Colorize an approval preview: "-" lines red, "+" lines green, hunk dim. */
+export function renderPreview(preview: string): string {
+  return preview
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('+')) return green(line);
+      if (line.startsWith('-')) return red(line);
+      return dim(line);
+    })
+    .join('\n');
+}
 
 /**
  * A transient "working…" line for silent gaps (tool execution, prefill,
@@ -152,7 +164,8 @@ export class PlainUi implements ReplUi {
     return this.reader.next(prompt);
   }
 
-  async ask(summary: string, allowAlways: boolean): Promise<Approval> {
+  async ask(summary: string, allowAlways: boolean, preview?: string): Promise<Approval> {
+    if (preview) this.write(`${renderPreview(preview)}\n`);
     const opts = allowAlways ? '[y/n/a]' : '[y/n]';
     const answer = (await this.reader.next(`${bold('allow')} ${summary}? ${opts} `) ?? '')
       .trim()

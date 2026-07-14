@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PromptTier } from '../models/profile.js';
+import { renderDiff } from './diff.js';
 import { hashContent, relPath, resolvePath } from './read.js';
 import { err, type Tool, type ToolResult } from './types.js';
 
@@ -35,6 +36,28 @@ export const writeTool: Tool = {
 
   pathOf(input, ctx) {
     return typeof input.file_path === 'string' ? resolvePath(input.file_path, ctx) : undefined;
+  },
+
+  preview(input, ctx) {
+    try {
+      const abs = resolvePath(input.file_path as string, ctx);
+      const content = String(input.content ?? '');
+      let existing: string | undefined;
+      try {
+        existing = fs.readFileSync(abs, 'utf8');
+      } catch {
+        /* new file */
+      }
+      if (existing === undefined) {
+        const lines = content.split('\n');
+        const head = lines.slice(0, 8).map((l) => `+ ${l}`);
+        if (lines.length > 8) head.push(`+ … (${lines.length - 8} more lines)`);
+        return [`new file · ${lines.length} lines`, ...head].join('\n');
+      }
+      return renderDiff(existing, content);
+    } catch {
+      return undefined; // preview must never block the approval flow
+    }
   },
 
   async call(input, ctx): Promise<ToolResult> {

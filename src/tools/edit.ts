@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import type { PromptTier } from '../models/profile.js';
+import { lineOf, renderDiff } from './diff.js';
 import { hashContent, relPath, resolvePath } from './read.js';
 import { err, type Tool, type ToolResult } from './types.js';
 
@@ -38,6 +39,24 @@ export const editTool: Tool = {
 
   pathOf(input, ctx) {
     return typeof input.file_path === 'string' ? resolvePath(input.file_path, ctx) : undefined;
+  },
+
+  preview(input, ctx) {
+    try {
+      const oldString = String(input.old_string ?? '');
+      const newString = String(input.new_string ?? '');
+      let startLine: number | undefined;
+      try {
+        const file = fs.readFileSync(resolvePath(input.file_path as string, ctx), 'utf8');
+        startLine = lineOf(file, oldString);
+      } catch {
+        /* header falls back to line 1 within the snippet */
+      }
+      const diff = renderDiff(oldString, newString, { startLine });
+      return input.replace_all === true ? `${diff}\n(replace all occurrences)` : diff;
+    } catch {
+      return undefined; // preview must never block the approval flow
+    }
   },
 
   async call(input, ctx): Promise<ToolResult> {

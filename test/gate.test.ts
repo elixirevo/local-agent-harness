@@ -3,7 +3,7 @@ import { PermissionGate, type Approval } from '../src/permissions/gate.js';
 import { bashTool } from '../src/tools/bash.js';
 import { writeTool } from '../src/tools/write.js';
 import type { Tool, ToolContext } from '../src/tools/types.js';
-import { tmpCtx } from './toolHelpers.js';
+import { seed, tmpCtx } from './toolHelpers.js';
 
 const answer = (a: Approval) => async () => a;
 
@@ -79,6 +79,33 @@ describe('PermissionGate approvals', () => {
     const allow = new Set<string>(['Write']);
     const gate = new PermissionGate('plan', ctx.cwd, answer('once'), '/nope/plan.md', allow);
     expect((await gate.check(writeTool, { file_path: 'a.ts', content: 'x' }, ctx)).allowed).toBe(false);
+  });
+});
+
+describe('PermissionGate previews', () => {
+  it('passes the tool diff preview to the approval prompt', async () => {
+    const { dir, ctx } = tmpCtx();
+    seed(dir, { 'a.txt': 'old\n' });
+    let seen: string | undefined;
+    const gate = new PermissionGate('ask', ctx.cwd, async (_s, _a, preview) => {
+      seen = preview;
+      return 'once';
+    });
+    await gate.check(writeTool, { file_path: 'a.txt', content: 'new\n' }, ctx);
+    expect(seen).toContain('- old');
+    expect(seen).toContain('+ new');
+    void dir;
+  });
+
+  it('tools without preview pass undefined', async () => {
+    const { ctx } = tmpCtx();
+    let seen: string | undefined = 'sentinel';
+    const gate = new PermissionGate('ask', ctx.cwd, async (_s, _a, preview) => {
+      seen = preview;
+      return 'once';
+    });
+    await gate.check(bashTool, { command: 'npm run build' }, ctx);
+    expect(seen).toBeUndefined();
   });
 });
 

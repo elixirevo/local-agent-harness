@@ -270,7 +270,7 @@ export async function runRepl(session: CliSession): Promise<void> {
     ui = new PlainUi(rl, interactive);
   }
 
-  session.askFn = ui.interactive ? (summary, allowAlways) => ui.ask(summary, allowAlways) : undefined;
+  session.askFn = ui.interactive ? (summary, allowAlways, preview) => ui.ask(summary, allowAlways, preview) : undefined;
   if (!session.planMode) {
     session.gate = new PermissionGate(
       session.baseMode,

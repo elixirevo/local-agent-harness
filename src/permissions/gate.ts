@@ -12,9 +12,10 @@ export type Approval = 'once' | 'always' | 'deny';
 /**
  * Asks the user to approve a call; summary is e.g. "Write(src/app.ts)".
  * allowAlways is false for destructive calls, so "always" is never offered
- * for them.
+ * for them. preview, when present, is a multi-line diff shown above the
+ * prompt.
  */
-export type AskFn = (summary: string, allowAlways: boolean) => Promise<Approval>;
+export type AskFn = (summary: string, allowAlways: boolean, preview?: string) => Promise<Approval>;
 
 export interface GateDecision {
   allowed: boolean;
@@ -83,7 +84,7 @@ export class PermissionGate {
       };
     }
     const summary = `${tool.name}(${tool.summarize(input, ctx)})${risk === 'destructive' ? ' [destructive]' : ''}`;
-    const approval = await this.askFn(summary, risk !== 'destructive');
+    const approval = await this.askFn(summary, risk !== 'destructive', tool.preview?.(input, ctx));
     if (approval === 'always' && risk !== 'destructive') {
       this.sessionAllow.add(tool.name);
       return { allowed: true };
