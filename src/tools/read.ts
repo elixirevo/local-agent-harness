@@ -8,7 +8,17 @@ export const MAX_READ_LINES = 2000;
 const MAX_LINE_CHARS = 2000;
 
 export function resolvePath(p: string, ctx: ToolContext): string {
-  return path.isAbsolute(p) ? path.normalize(p) : path.resolve(ctx.cwd, p);
+  const abs = path.isAbsolute(p) ? path.normalize(p) : path.resolve(ctx.cwd, p);
+  // Mention-marker recovery: models sometimes copy the user's "@path" into
+  // tool calls verbatim. When the literal path does not exist but the path
+  // without the leading @ does, use the real file. A file genuinely named
+  // with a leading @ still wins — the literal is checked first.
+  if (p.startsWith('@') && !fs.existsSync(abs)) {
+    const stripped = p.slice(1);
+    const cand = path.isAbsolute(stripped) ? path.normalize(stripped) : path.resolve(ctx.cwd, stripped);
+    if (fs.existsSync(cand)) return cand;
+  }
+  return abs;
 }
 
 /** Fast content fingerprint for the write/edit optimistic lock (not security). */

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import * as readline from 'node:readline/promises';
 import { compactSession } from '../compact/compact.js';
 import { budgetStatus } from '../context/budget.js';
@@ -186,7 +188,38 @@ function renderEvent(ev: AgentEvent, st: RenderState, ui: ReplUi): void {
  * carries an assistant message with dangling tool calls. The iterator is
  * driven manually so the UI can show a "working" indicator during each wait.
  */
+/**
+ * Paths the user @-mentioned in a message — tokens whose @-stripped path
+ * exists under cwd (so emails and plain @words never match). Trailing
+ * punctuation is tolerated ("@src/app.ts?").
+ */
+export function mentionedPaths(text: string, cwd: string): string[] {
+  const out = new Set<string>();
+  const re = /(?:^|\s)@([^\s@][^\s]*)/g;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    for (const cand of [m[1], m[1].replace(/[.,;:!?)\]'"”’]+$/, '')]) {
+      if (!cand) continue;
+      const abs = path.isAbsolute(cand) ? cand : path.join(cwd, cand);
+      if (fs.existsSync(abs)) {
+        out.add(cand);
+        break;
+      }
+    }
+  }
+  return [...out];
+}
+
 async function chatTurn(session: CliSession, input: string, ui: ReplUi, signal?: AbortSignal): Promise<void> {
+  // Small models copy "@path" into tool calls as-is; tell them up front what
+  // the marker means and which real paths were referenced.
+  const mentions = mentionedPaths(input, session.toolCtx.cwd);
+  if (mentions.length > 0) {
+    session.reminders.enqueue(
+      `The user's @-mentions refer to existing paths in the working directory: ${mentions.join(', ')}. ` +
+        'The leading "@" is only a mention marker, NOT part of the filename — ' +
+        `use the path without it (e.g. Read ${mentions[0]}).`,
+    );
+  }
   const snapshot = session.messages.slice();
   const st = newRenderState();
   try {
