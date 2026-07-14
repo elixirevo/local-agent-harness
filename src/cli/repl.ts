@@ -9,6 +9,7 @@ import { PermissionGate, type AskFn, type PermissionMode } from '../permissions/
 import { planFilePath, planModeEnterReminder, planModeExitReminder } from '../prompts/planMode.js';
 import { createProvider } from '../providers/index.js';
 import type { Usage } from '../providers/types.js';
+import { clearAllowlist } from '../permissions/allowlist.js';
 import { sandboxAvailable, sessionSandbox } from '../sandbox/exec.js';
 import { rememberNote } from '../session/memory.js';
 import { listSessions, loadSession, SessionStore } from '../session/store.js';
@@ -47,6 +48,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: '/provider', desc: '<name> — switch provider' },
   { name: '/plan', desc: 'toggle plan mode (read-only + plan file)' },
   { name: '/sandbox', desc: 'toggle the Bash sandbox (or: /sandbox on|off)' },
+  { name: '/permissions', desc: 'list always-allowed tools (or: /permissions clear)' },
   { name: '/mcp', desc: 'list connected MCP servers' },
   { name: '/remember', desc: '<note> — save to AGENTS.md' },
   { name: '/session', desc: 'show where this session is saved' },
@@ -500,6 +502,23 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
         session.config.sandbox.bash = 'off';
         session.toolCtx.sandbox = undefined;
         l(dim('sandbox OFF — Bash runs unrestricted; mutations ask for approval again'));
+      }
+      return false;
+    }
+    case '/permissions': {
+      if (arg === 'clear') {
+        clearAllowlist(session.toolCtx.cwd, session.sessionAllow);
+        l(dim('always-allow list cleared (memory and .harness/settings.json)'));
+        return false;
+      }
+      if (arg) {
+        l(red(`unknown argument "${arg}" — use /permissions or /permissions clear`));
+        return false;
+      }
+      if (session.sessionAllow.size === 0) {
+        l(dim('no always-allowed tools — answer "a" at an approval prompt to add one (persisted to .harness/settings.json)'));
+      } else {
+        l(`always allowed: ${[...session.sessionAllow].sort().join(', ')} ${dim('· /permissions clear to reset')}`);
       }
       return false;
     }

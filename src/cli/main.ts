@@ -9,6 +9,7 @@ import { startupContext } from '../context/startup.js';
 import { effectiveContextLength, effectiveMcpServers, loadConfig, WEB_FETCH_MODES, type WebFetchMode } from '../config/config.js';
 import { resolveProfile, type PromptTier } from '../models/profile.js';
 import { closeMcpConnections, connectMcpServers, type McpConnection } from '../mcp/index.js';
+import { loadAllowlist } from '../permissions/allowlist.js';
 import { PermissionGate, PERMISSION_MODES, type PermissionMode } from '../permissions/gate.js';
 import { buildSystemPrompt, type ToolProtocol } from '../prompts/assemble.js';
 import { planFilePath, planModeEnterReminder } from '../prompts/planMode.js';
@@ -256,7 +257,8 @@ async function main(): Promise<void> {
   const planMode = values.plan === true;
   const planFile = planFilePath(cwd);
   if (planMode) reminders.enqueue(planModeEnterReminder(planFile));
-  const sessionAllow = new Set<string>();
+  // "always" answers persist in .harness/settings.json across sessions.
+  const sessionAllow = loadAllowlist(cwd);
 
   const skillsLoad = loadSkills({
     projectDir: path.join(cwd, '.harness', 'skills'),
