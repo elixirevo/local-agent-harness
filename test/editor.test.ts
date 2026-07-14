@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { charWidth, displayWidth, truncateAnsi } from '../src/cli/ansi.js';
 import {
+  activeMention,
   computeInputView,
   computeMultilineView,
+  currentToken,
   filterCommands,
+  filterFiles,
   HintMenu,
   InputLine,
   renderMenuRows,
@@ -312,6 +315,60 @@ describe('renderMenuRows (vertical menu)', () => {
 
   it('returns nothing for an empty list', () => {
     expect(renderMenuRows([], 0, 6, 80)).toEqual([]);
+  });
+});
+
+describe('@ file mentions', () => {
+  it('currentToken finds the token ending at the cursor', () => {
+    expect(currentToken('hello @src', 10)).toEqual({ start: 6, text: '@src' });
+    expect(currentToken('hello @src', 8)).toEqual({ start: 6, text: '@s' });
+    expect(currentToken('@a', 2)).toEqual({ start: 0, text: '@a' });
+    expect(currentToken('a b', 3)).toEqual({ start: 2, text: 'b' });
+    expect(currentToken('line1\n@x', 8)).toEqual({ start: 6, text: '@x' });
+  });
+
+  it('activeMention triggers on @tokens and nothing else', () => {
+    expect(activeMention('explain @src/cli', 16)).toEqual({ start: 8, query: 'src/cli' });
+    expect(activeMention('@', 1)).toEqual({ start: 0, query: '' });
+    expect(activeMention('plain text', 10)).toBeUndefined();
+    expect(activeMention('user@host.com', 13)).toBeUndefined(); // @ mid-word
+    expect(activeMention('a @@escaped', 11)).toBeUndefined();
+    // cursor before the @ token → no mention
+    expect(activeMention('hi @src', 2)).toBeUndefined();
+  });
+
+  it('filterFiles ranks prefix matches before substring matches', () => {
+    const files = ['README.md', 'src/', 'src/cli/', 'src/cli/tui.ts', 'test/tui-helpers.ts'];
+    expect(filterFiles(files, 'src')).toEqual(['src/', 'src/cli/', 'src/cli/tui.ts']);
+    // no prefix match for 'tui' → substring matches in list order
+    expect(filterFiles(files, 'tui')).toEqual(['src/cli/tui.ts', 'test/tui-helpers.ts']);
+    expect(filterFiles(files, 'TUI')).toEqual(['src/cli/tui.ts', 'test/tui-helpers.ts']); // case-insensitive
+    expect(filterFiles(files, '')).toEqual(files); // empty query → head of list
+    expect(filterFiles(files, 'zzz')).toEqual([]);
+  });
+
+  it('InputLine.replaceRange swaps a token and parks the cursor after it', () => {
+    const l = new InputLine();
+    l.insert('explain @sr please');
+    // replace "@sr" (start 8, end 11) with the completed mention
+    l.replaceRange(8, 11, '@src/cli/tui.ts ');
+    expect(l.value).toBe('explain @src/cli/tui.ts  please');
+    expect(l.cursorPos).toBe(8 + '@src/cli/tui.ts '.length);
+  });
+
+  it('HintMenu.set keeps selection per key and resets across keys', () => {
+    const m = new HintMenu();
+    const items = [
+      { name: 'a.ts', desc: 'file' },
+      { name: 'b.ts', desc: 'file' },
+    ];
+    m.set(items, '@a');
+    m.next();
+    expect(m.selected?.name).toBe('b.ts');
+    m.set(items, '@a'); // same key → selection kept
+    expect(m.selected?.name).toBe('b.ts');
+    m.set(items, '@ab'); // new key → reset
+    expect(m.selected?.name).toBe('a.ts');
   });
 });
 

@@ -14,6 +14,7 @@ import { sandboxAvailable, sessionSandbox } from '../sandbox/exec.js';
 import { rememberNote } from '../session/memory.js';
 import { listSessions, loadSession, SessionStore } from '../session/store.js';
 import { expandSkill, type Skill } from '../skills/loader.js';
+import { walkFiles } from '../tools/walk.js';
 import { bold, dim, green, red, truncateAnsi } from './ansi.js';
 import type { SlashCommand } from './editor.js';
 import { canUseRawTui, RawTui } from './tui.js';
@@ -262,7 +263,7 @@ export async function runRepl(session: CliSession): Promise<void> {
   const useRaw = !session.plain && canUseRawTui();
   let ui: ReplUi;
   if (useRaw) {
-    ui = new RawTui(allCommands(session.skills));
+    ui = new RawTui(allCommands(session.skills), () => listMentionables(session.toolCtx.cwd));
   } else {
     const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
     const rl = readline.createInterface({
@@ -424,6 +425,24 @@ async function resumeCommand(session: CliSession, ui: ReplUi, arg: string | unde
   if (loaded.meta.model !== session.model) {
     ui.write(dim(`note: recorded with ${loaded.meta.model}; you are on ${session.model} (switch with /model)\n`));
   }
+}
+
+/**
+ * Paths offered by the @ mention menu: every walked file plus the directories
+ * derived from them (trailing /), sorted so siblings group together. Harness
+ * internals are excluded on top of the walker's junk-dir pruning.
+ */
+function listMentionables(cwd: string): string[] {
+  const files = walkFiles(cwd).filter((f) => !f.rel.startsWith('.harness/'));
+  const dirs = new Set<string>();
+  for (const f of files) {
+    let p = f.rel;
+    for (let i = p.lastIndexOf('/'); i > 0; i = p.lastIndexOf('/')) {
+      p = p.slice(0, i);
+      dirs.add(`${p}/`);
+    }
+  }
+  return [...dirs, ...files.map((f) => f.rel)].sort();
 }
 
 /** Switch the session to a model: profile, context length, thinking. */

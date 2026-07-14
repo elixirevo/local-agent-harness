@@ -1,6 +1,15 @@
 import type { Approval } from '../permissions/gate.js';
 import { bold, cyan, dim, displayWidth, green, red, truncateAnsi } from './ansi.js';
-import { computeMultilineView, HintMenu, InputLine, renderMenuRows, type SlashCommand } from './editor.js';
+import {
+  activeMention,
+  computeMultilineView,
+  filterFiles,
+  HintMenu,
+  InputLine,
+  renderMenuRows,
+  type MentionState,
+  type SlashCommand,
+} from './editor.js';
 import { renderPreview, type ReplUi } from './ui.js';
 
 const WAIT_DELAY_MS = 150;
@@ -46,6 +55,10 @@ export class RawTui implements ReplUi {
   } | null = null;
   /** Accumulates a bracketed paste until its terminator arrives. */
   private pasting: string | null = null;
+  /** The "@path" being completed, when the menu is in file-mention mode. */
+  private mention: MentionState | null = null;
+  /** File listing cached while a mention is active (re-scanned per mention). */
+  private fileCache: string[] | null = null;
   private lineResolver: ((v: string | undefined) => void) | null = null;
   private askResolver: ((a: Approval) => void) | null = null;
   private askAllowAlways = false;
@@ -60,7 +73,11 @@ export class RawTui implements ReplUi {
   private readonly onResize = () => this.handleResize();
   private readonly onExit = () => this.restoreTerminal();
 
-  constructor(private readonly slashCommands: SlashCommand[]) {
+  constructor(
+    private readonly slashCommands: SlashCommand[],
+    /** Lists mentionable paths (files + dirs with trailing /) for @completion. */
+    private readonly listFiles?: () => string[],
+  ) {
     this.rows = this.out.rows ?? 24;
     this.cols = this.out.columns ?? 80;
     // Default bar: spacer + 1 input row + spacer + hint row.
@@ -339,6 +356,21 @@ export class RawTui implements ReplUi {
 
   /** Keep the hint menu in sync with the current input text. */
   private syncMenu(): void {
+    const mention = this.listFiles ? activeMention(this.input.value, this.input.cursorPos) : undefined;
+    if (mention) {
+      this.mention = mention;
+      this.fileCache ??= this.listFiles!();
+      // Exclude the exact-typed dir itself so Enter always makes progress
+      // (descend shows its children, not the dir again).
+      const matches = filterFiles(this.fileCache, mention.query).filter((p) => p !== mention.query);
+      this.menu.set(
+        matches.map((p) => ({ name: p, desc: p.endsWith('/') ? 'dir' : 'file' })),
+        `@${mention.query}`,
+      );
+      return;
+    }
+    this.mention = null;
+    this.fileCache = null; // next @ re-scans, picking up new files
     this.menu.update(this.slashCommands, this.input.value);
   }
 
@@ -365,6 +397,17 @@ export class RawTui implements ReplUi {
     // input; a second Enter (input now equals the selection) submits it.
     this.syncMenu();
     const selected = this.menu.selected;
+    // File mention: replace the @token. A file gets a trailing space (token
+    // ends → menu closes); a directory keeps the menu open to descend.
+    if (this.menu.active && selected && this.mention) {
+      const isDir = selected.name.endsWith('/');
+      this.input.replaceRange(
+        this.mention.start,
+        this.input.cursorPos,
+        `@${selected.name}${isDir ? '' : ' '}`,
+      );
+      return;
+    }
     if (this.menu.active && selected && this.input.value !== selected.name) {
       this.input.replace(selected.name);
       return;
@@ -435,9 +478,13 @@ export class RawTui implements ReplUi {
     if (menuCount > 0) {
       const enterLabel = this.choosing
         ? 'select'
-        : this.menu.selected && this.input.value === this.menu.selected.name
-          ? 'run'
-          : 'fill';
+        : this.mention
+          ? this.menu.selected?.name.endsWith('/')
+            ? 'descend'
+            : 'add'
+          : this.menu.selected && this.input.value === this.menu.selected.name
+            ? 'run'
+            : 'fill';
       const lines = renderMenuRows(menuItems, selIdx, maxMenu, this.cols, enterLabel);
       lines.forEach((line, i) => {
         out += `\x1b[${hintTop + i};1H\x1b[2K${line}`;
@@ -457,7 +504,7 @@ export class RawTui implements ReplUi {
       const elapsed = ((Date.now() - this.waitStart) / 1000).toFixed(1);
       return dim(`${WAIT_FRAMES[this.frame]} working… ${elapsed}s   (ctrl+c to interrupt)`);
     }
-    return dim('enter send · / for commands · ↑↓ history · ctrl+c interrupt');
+    return dim('enter send · / for commands · @ files · ↑↓ history · ctrl+c interrupt');
   }
 
   private handleResize(): void {

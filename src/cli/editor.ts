@@ -209,6 +209,14 @@ export class InputLine {
     this.histIdx = null;
   }
 
+  /** Replace [start, end) with text (mention completion), cursor after it. */
+  replaceRange(start: number, end: number, text: string): void {
+    const s = Math.max(0, Math.min(start, this.buffer.length));
+    const e = Math.max(s, Math.min(end, this.buffer.length));
+    this.buffer = this.buffer.slice(0, s) + text + this.buffer.slice(e);
+    this.cursor = s + text.length;
+  }
+
   /** Take the current line, push non-empty to history, reset. */
   submit(): string {
     const line = this.buffer;
@@ -267,22 +275,28 @@ export function filterCommands(commands: SlashCommand[], input: string): SlashCo
 
 /**
  * Keyboard-navigable selection over the hint-bar matches. Pure state (no
- * terminal I/O): the TUI calls update() with the current input, moves the
- * selection with next()/prev(), and reads selected/index to render and to
- * fill the input on Enter. The selection resets whenever the filter changes.
+ * terminal I/O): the TUI supplies the current matches with set()/update(),
+ * moves the selection with next()/prev(), and reads selected/index to render
+ * and to fill the input on Enter. The selection resets whenever the filter
+ * key changes.
  */
 export class HintMenu {
   private items: SlashCommand[] = [];
   private idx = 0;
   private filterKey: string | null = null;
 
-  update(commands: SlashCommand[], input: string): void {
-    this.items = filterCommands(commands, input);
-    if (input !== this.filterKey) {
+  /** Supply pre-filtered items; key identifies the filter for index resets. */
+  set(items: SlashCommand[], key: string): void {
+    this.items = items;
+    if (key !== this.filterKey) {
       this.idx = 0;
-      this.filterKey = input;
+      this.filterKey = key;
     }
     if (this.idx >= this.items.length) this.idx = 0;
+  }
+
+  update(commands: SlashCommand[], input: string): void {
+    this.set(filterCommands(commands, input), input);
   }
 
   get active(): boolean {
@@ -308,6 +322,48 @@ export class HintMenu {
   prev(): void {
     if (this.items.length > 0) this.idx = (this.idx - 1 + this.items.length) % this.items.length;
   }
+}
+
+/** The whitespace-delimited token that ends at the cursor. */
+export function currentToken(value: string, cursor: number): { start: number; text: string } {
+  const before = value.slice(0, cursor);
+  const ws = Math.max(before.lastIndexOf(' '), before.lastIndexOf('\t'), before.lastIndexOf('\n'));
+  return { start: ws + 1, text: before.slice(ws + 1) };
+}
+
+export interface MentionState {
+  /** Index of the '@' in the buffer. */
+  start: number;
+  /** Text typed after the '@', up to the cursor. */
+  query: string;
+}
+
+/** An "@path" being typed at the cursor, or undefined. */
+export function activeMention(value: string, cursor: number): MentionState | undefined {
+  const { start, text } = currentToken(value, cursor);
+  if (!text.startsWith('@') || text.startsWith('@@')) return undefined;
+  return { start, query: text.slice(1) };
+}
+
+const MAX_FILE_MATCHES = 50;
+
+/**
+ * Filter mentionable paths for the query: prefix matches first, then
+ * substring matches, both case-insensitive. An empty query returns the
+ * head of the list.
+ */
+export function filterFiles(paths: string[], query: string): string[] {
+  if (!query) return paths.slice(0, MAX_FILE_MATCHES);
+  const q = query.toLowerCase();
+  const prefix: string[] = [];
+  const substr: string[] = [];
+  for (const p of paths) {
+    const lower = p.toLowerCase();
+    if (lower.startsWith(q)) prefix.push(p);
+    else if (lower.includes(q)) substr.push(p);
+    if (prefix.length >= MAX_FILE_MATCHES) break;
+  }
+  return [...prefix, ...substr].slice(0, MAX_FILE_MATCHES);
 }
 
 /**
