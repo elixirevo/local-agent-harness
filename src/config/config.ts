@@ -59,6 +59,8 @@ export interface HarnessConfig {
   webFetch: WebFetchMode;
   /** Bash isolation (see SandboxConfig). */
   sandbox: SandboxConfig;
+  /** File-state snapshots before mutating tool calls (/rewind restores). */
+  checkpoints: 'on' | 'off';
   /** MCP servers to connect over stdio; their tools register as mcp__name__tool. */
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   /** Profile overrides keyed by exact model id or family name. */
@@ -89,6 +91,7 @@ const DEFAULTS: HarnessConfig = {
   compaction: DEFAULT_COMPACTION,
   webFetch: 'off',
   sandbox: { bash: 'off', allowNetwork: false, extraWritePaths: [] },
+  checkpoints: 'on',
 };
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -120,6 +123,9 @@ export function loadConfig(cwd: string = process.cwd()): HarnessConfig {
   }
   if (merged.sandbox.bash !== 'off' && merged.sandbox.bash !== 'on') {
     throw new Error(`invalid sandbox.bash "${merged.sandbox.bash}" — use "off" or "on"`);
+  }
+  if (merged.checkpoints !== 'on' && merged.checkpoints !== 'off') {
+    throw new Error(`invalid checkpoints "${merged.checkpoints}" — use "on" or "off"`);
   }
   return merged;
 }

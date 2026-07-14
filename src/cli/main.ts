@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { createAgentTool } from '../agents/agentTool.js';
+import { CheckpointStore } from '../checkpoints/store.js';
 import { ReminderQueue } from '../context/reminders.js';
 import { startupContext } from '../context/startup.js';
 import { effectiveContextLength, effectiveMcpServers, loadConfig, WEB_FETCH_MODES, type WebFetchMode } from '../config/config.js';
@@ -282,6 +283,7 @@ async function main(): Promise<void> {
       ? new PermissionGate('plan', cwd, undefined, planFile, sessionAllow)
       : new PermissionGate(mode, cwd, undefined, undefined, sessionAllow),
     toolCtx: { cwd, readFiles: new Map(), sandbox },
+    checkpoints: config.checkpoints === 'on' ? new CheckpointStore(cwd) : undefined,
     maxSteps: config.maxSteps,
     protocol,
     reminders,

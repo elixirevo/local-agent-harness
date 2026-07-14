@@ -1,3 +1,4 @@
+import type { CheckpointStore } from '../checkpoints/store.js';
 import { compactSession } from '../compact/compact.js';
 import { budgetStatus, type CompactionSettings } from '../context/budget.js';
 import { clearOldToolResults } from '../context/frc.js';
@@ -38,6 +39,8 @@ export interface AgentSession {
   transcriptPath?: string;
   /** Called after auto-compaction so the caller can persist the rebuilt history. */
   onCompacted?: (messages: ChatMessage[]) => void;
+  /** When set, the tree is snapshotted before every mutating tool call. */
+  checkpoints?: CheckpointStore;
 }
 
 export type AgentEvent =
@@ -395,6 +398,16 @@ async function runCall(
       `permission denied: ${decision.reason}. Do not retry the same call — adjust your approach or ask the user.`,
       summary,
     );
+  }
+
+  // Snapshot the tree before an approved mutation executes, so /rewind can
+  // restore the state right before it. Best-effort: a checkpoint failure
+  // must never block the tool.
+  if (session.checkpoints) {
+    const risk = tool.riskOf?.(input, session.toolCtx) ?? (tool.isReadOnly ? 'read' : 'mutate');
+    if (risk !== 'read') {
+      await session.checkpoints.snapshot(`${tool.name} ${summary}`.slice(0, 80)).catch(() => {});
+    }
   }
 
   try {

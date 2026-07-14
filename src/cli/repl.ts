@@ -49,6 +49,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: '/plan', desc: 'toggle plan mode (read-only + plan file)' },
   { name: '/sandbox', desc: 'toggle the Bash sandbox (or: /sandbox on|off)' },
   { name: '/permissions', desc: 'list always-allowed tools (or: /permissions clear)' },
+  { name: '/rewind', desc: 'restore files to an earlier checkpoint' },
   { name: '/mcp', desc: 'list connected MCP servers' },
   { name: '/remember', desc: '<note> — save to AGENTS.md' },
   { name: '/session', desc: 'show where this session is saved' },
@@ -503,6 +504,44 @@ async function handleCommand(session: CliSession, input: string, ui: ReplUi): Pr
         session.toolCtx.sandbox = undefined;
         l(dim('sandbox OFF — Bash runs unrestricted; mutations ask for approval again'));
       }
+      return false;
+    }
+    case '/rewind': {
+      if (!session.checkpoints) {
+        l(dim('(checkpoints are off — set "checkpoints": "on" in harness.config.json)'));
+        return false;
+      }
+      let cps: Awaited<ReturnType<NonNullable<typeof session.checkpoints>['list']>>;
+      try {
+        cps = await session.checkpoints.list();
+      } catch (err) {
+        printError(session, ui, err);
+        return false;
+      }
+      if (cps.length === 0) {
+        l(dim('no checkpoints yet — one is taken before every mutating tool call'));
+        return false;
+      }
+      const items = cps.map((c) => ({
+        name: c.sha,
+        desc: `${c.label} · ${new Date(c.when).toLocaleString()}`,
+      }));
+      const idx = await ui.choose('rewind files to which checkpoint?', items);
+      if (idx === undefined) {
+        l(dim('cancelled'));
+        return false;
+      }
+      try {
+        await session.checkpoints.restore(cps[idx].sha);
+      } catch (err) {
+        printError(session, ui, err);
+        return false;
+      }
+      session.toolCtx.readFiles.clear();
+      session.reminders.enqueue(
+        `Files were restored to checkpoint "${cps[idx].label}" — the filesystem changed outside this conversation. Read files again before editing them.`,
+      );
+      l(dim(`restored to ${cps[idx].sha} (${cps[idx].label}) — the pre-rewind state was checkpointed as "before /rewind"`));
       return false;
     }
     case '/permissions': {

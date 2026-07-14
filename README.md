@@ -31,7 +31,8 @@ npm start -- -P llamacpp                     # 프로바이더 지정
 ```
 
 REPL 명령: `/help` `/models`(메뉴에서 모델 선택) `/model <id>` `/provider <name>` `/plan`
-`/sandbox [on|off]` `/mcp` `/remember <note>` `/context` `/compact` `/session` `/clear` `/exit`
+`/sandbox [on|off]` `/permissions [clear]` `/rewind` `/mcp` `/remember <note>` `/context`
+`/compact` `/session` `/clear` `/exit`
 
 ### 전역 설치 — 어디서든 `harness`
 
@@ -103,8 +104,23 @@ mutate 취급.
 | `ask` | 변이 호출마다 확인. read 분류 Bash 명령은 자동 허용 (샌드박스가 켜져 있으면 격리된 mutate도 자동 — 아래 샌드박스 참조) |
 | `auto` | 작업 디렉터리 안의 변이는 자동 허용. **destructive는 항상 확인** |
 
-`ask` 모드의 승인 프롬프트는 **y(허용) / n(거부) / a(항상)** 로 답한다. `a`는 그 도구(예: Write)를
-세션 동안 다시 묻지 않도록 기억한다(파괴적 명령은 항상 확인 — a를 제공하지 않음).
+`ask` 모드의 승인 프롬프트는 **y(허용) / n(거부) / a(항상)** 로 답한다. Write/Edit 승인에는
+**diff 미리보기**(변경 지점의 ±줄, 실제 파일 라인 번호)가 함께 표시되어 내용을 보고 판단할 수 있다.
+`a`는 그 도구(예: Write)를 다시 묻지 않도록 기억하며, **`.harness/settings.json`에 저장되어 다음
+세션에도 적용**된다(파괴적 명령은 항상 확인 — a를 제공하지 않음). `/permissions`로 목록을 보고
+`/permissions clear`로 초기화한다.
+
+## 체크포인트와 /rewind
+
+변이 도구 호출(Write/Edit/Bash mutate)이 실행되기 **직전마다** 작업 트리가 섀도우 git 저장소
+(`.harness/checkpoints`)에 스냅샷된다 — 프로젝트의 실제 git 저장소는 건드리지 않는다. 모델이
+잘못된 편집을 해도 `/rewind`로 메뉴에서 시점을 골라 파일 상태를 통째로 복원할 수 있다:
+
+- 복원 직전 상태도 "before /rewind"로 자동 스냅샷 — **되돌리기 자체가 되돌려진다.**
+- 체크포인트 이후 생성된 파일은 복원 시 제거된다. 단 `.harness/`, `node_modules/`, `.git/`과
+  프로젝트 `.gitignore`가 무시하는 경로는 스냅샷·복원 대상에서 제외.
+- 복원 후에는 "파일이 바뀌었으니 다시 읽으라"는 리마인더가 모델에게 주입된다.
+- 기본 on. 큰 저장소에서 변이마다의 스냅샷 비용이 부담되면 `"checkpoints": "off"`.
 
 ## 샌드박스 (Bash 격리)
 
@@ -365,6 +381,7 @@ config `saveSessions: false`). 복원 경로 세 가지:
   "contextLength": 32768,
   "webFetch": "off",
   "sandbox": { "bash": "off", "allowNetwork": false, "extraWritePaths": [] },
+  "checkpoints": "on",
   "providers": {
     "ollama": { "type": "ollama", "baseUrl": "http://localhost:11434", "keepAlive": "10m" }
   },
